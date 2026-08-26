@@ -28,16 +28,18 @@ en quelques minutes. Il embarque :
 Après l'installation et le premier démarrage, le panneau est disponible sur :
 - `http://<IP>:8441` — identifiants par défaut `admin` / `admin123`
 
-## Disponibilité des versions
+## Canaux de distribution
 
-| Canal | Version | Description |
-|-------|---------|-------------|
-| **Normal (stable)** | `1.0.1` | Version stable publiée. |
-| **DEV (préversion)** | `1.0.3-BETA` | La version **1.0.3** est actuellement disponible dans le canal **DEV** (préversion). Elle aligne la version affichée partout, embarque le noyau 7.1.10 et ajoute un résumé matériel à `vos status`. |
+VirtuaOS est distribué via **deux canaux de mise à jour** :
 
-> **Note :** la version **1.0.3** est disponible dans les deux canaux —
-> le canal **DEV** (`dep.auxinux.ca/VIRTUAOS/DEV/`) pour les préversions, et le
-> canal **Normal** (`dep.auxinux.ca/VIRTUAOS/`) pour les versions stables.
+| Canal | URL | Contenu |
+|-------|-----|---------|
+| **Normal (stable)** | `https://dep.auxinux.ca/VIRTUAOS/` | Versions **stables** finalisées, recommandées pour la production. |
+| **DEV (préversion)** | `https://dep.auxinux.ca/VIRTUAOS/DEV/` | Préversions **BETA** en cours de développement, réservées aux utilisateurs souhaitant tester les nouveautés en avant-première. |
+
+Le canal **Normal** est destiné à la communauté. Le canal **DEV** permet d'accéder
+aux versions en cours de validation avant leur passage en stable.
+
 
 ## Construire l'ISO
 
@@ -158,16 +160,17 @@ minutes. It ships:
 After install + first boot, the panel is available at:
 - `http://<IP>:8441` — default credentials `admin` / `admin123`
 
-## Available releases
+## Distribution channels
 
-| Channel | Version | Description |
-|---------|---------|-------------|
-| **Normal (stable)** | `1.0.1` | The stable public release. |
-| **DEV (pre-release)** | `1.0.3-BETA` | The **1.0.3** release is currently available in the **DEV** channel (pre-release). It aligns the displayed version everywhere, ships kernel 7.1.10 and adds a hardware summary to `vos status`. |
+VirtuaOS is distributed through **two update channels**:
 
-> **Note:** release **1.0.3** is currently available in both channels — the
-> **DEV** channel (`dep.auxinux.ca/VIRTUAOS/DEV/`) for pre-releases and the
-> **Normal** channel (`dep.auxinux.ca/VIRTUAOS/`) for stable releases.
+| Channel | URL | Content |
+|---------|-----|---------|
+| **Normal (stable)** | `https://dep.auxinux.ca/VIRTUAOS/` | Finalized **stable** releases, recommended for production. |
+| **DEV (pre-release)** | `https://dep.auxinux.ca/VIRTUAOS/DEV/` | **BETA** pre-releases under development, for users who want to test new features early. |
+
+The **Normal** channel targets the community. The **DEV** channel gives access
+to releases being validated before they move to stable.
 
 ## Building the ISO
 
