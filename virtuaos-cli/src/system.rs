@@ -1,11 +1,14 @@
 //! System inspection: versions and service health.
 
+use crate::channel::{self, Channel};
+use crate::version::extract_version;
 use anyhow::Result;
 use owo_colors::OwoColorize;
 use std::process::Command;
 
-/// AuxiNux packages tracked by the updater (served from dep.auxinux.ca/VIRTUA).
-pub const PACKAGES: &[&str] = &["kernel-virtua", "auxinux-virtua", "virtuaos-cli"];
+/// Application packages tracked by the updater (served from dep.auxinux.ca/VIRTUA).
+/// The kernel meta-packages (kernel-virtua / kernel-virtua-dev) are shown separately.
+pub const PACKAGES: &[&str] = &["auxinux-virtua", "virtuaos-cli"];
 
 /// Services whose health we surface in `status`.
 const SERVICES: &[&str] = &[
@@ -72,30 +75,12 @@ fn os_release_field(text: &str, key: &str) -> Option<String> {
     })
 }
 
-fn extract_version(text: &str) -> Option<String> {
-    let bytes = text.as_bytes();
-    for start in 0..bytes.len() {
-        if !bytes[start].is_ascii_digit() {
-            continue;
-        }
-        let mut end = start;
-        let mut dots = 0;
-        while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b'.') {
-            if bytes[end] == b'.' {
-                dots += 1;
-            }
-            end += 1;
-        }
-        if dots >= 1 {
-            return Some(text[start..end].trim_end_matches('.').to_string());
-        }
-    }
-    None
-}
-
-/// Installed version of a dpkg package, if present.
+/// Installed version of a dpkg package, if present (removed-but-not-purged
+/// packages count as absent).
 pub fn pkg_version(pkg: &str) -> Option<String> {
-    capture("dpkg-query", &["-W", "-f=${Version}", pkg])
+    let out = capture("dpkg-query", &["-W", "-f=${Status}|${Version}", pkg])?;
+    let (status, version) = out.split_once('|')?;
+    (status.ends_with(" installed") && !version.is_empty()).then(|| version.to_string())
 }
 
 // ── Hardware detection (best-effort, never fatal) ────────────────────────────
@@ -201,24 +186,76 @@ pub fn service_active(unit: &str) -> bool {
 
 /// Print VirtuaOS/kernel/tracked-package versions plus this running binary's
 /// own version (`virtuaos version`).
+///
+/// `kernel (running)` is `uname -r`; the `kernel-virtua*` lines are the
+/// META-packages (their own version + the kernel they pull in). A warning is
+/// printed when the running kernel is not the one of the selected channel.
 pub fn print_versions() -> Result<()> {
+    const W: usize = 25;
     println!("{}", os_pretty_name().bold());
     println!(
-        "  {:<14} {}",
+        "  {:<W$} {}",
         "virtuaos",
         virtuaos_release().unwrap_or_else(|| "unset".dimmed().to_string())
     );
-    println!("  {:<14} {}", "kernel", kernel_release());
+    let is_vos = channel::is_virtuaos();
+    let ch = channel::read();
+    if is_vos {
+        println!("  {:<W$} {}", "branch VirtuaOS", ch.virtuaos.badge());
+    }
+
+    let running = kernel_release();
+    let running_ch = channel::kernel_release_channel(&running);
+    println!("  {:<W$} {} [{}]", "kernel (running)", running, running_ch.badge());
+    if is_vos {
+        println!("  {:<W$} {}", "kernel channel", ch.kernel.badge());
+    }
+    for meta_ch in [Channel::Prod, Channel::Dev] {
+        let meta = meta_ch.kernel_meta();
+        let label = format!("{meta} (meta)");
+        match pkg_version(meta) {
+            Some(v) => {
+                let target = channel::meta_target_kernel(meta)
+                    .map(|k| format!(" → {k}"))
+                    .unwrap_or_default();
+                println!("  {:<W$} {}{}", label, v, target.dimmed());
+            }
+            None if meta_ch == Channel::Prod => {
+                println!("  {:<W$} {}", label, "not installed".dimmed())
+            }
+            None => {}
+        }
+    }
     for pkg in PACKAGES {
         let v = pkg_version(pkg).unwrap_or_else(|| "not installed".dimmed().to_string());
-        println!("  {:<14} {}", pkg, v);
+        println!("  {:<W$} {}", pkg, v);
     }
     println!(
-        "  {:<14} {} {}",
+        "  {:<W$} {} {}",
         "virtuaos (cli)",
         env!("CARGO_PKG_VERSION"),
         "(running)".dimmed()
     );
+
+    if is_vos {
+        let expected = channel::meta_target_kernel(ch.kernel.kernel_meta());
+        if running_ch != ch.kernel {
+            println!(
+                "\n{} running kernel is {} but the kernel channel is {} — run `vos channel kernel {}` then reboot",
+                "⚠".yellow(),
+                running_ch,
+                ch.kernel,
+                ch.kernel.as_str().to_lowercase()
+            );
+        } else if let Some(k) = expected.filter(|k| *k != running) {
+            println!(
+                "\n{} running kernel {} differs from {} → {k} (reboot to switch)",
+                "ℹ".blue(),
+                running,
+                ch.kernel.kernel_meta()
+            );
+        }
+    }
     Ok(())
 }
 

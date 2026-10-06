@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  VirtuaOS — Remove the initial admin password from the Virtua .env
+#
+#  virtuaos-firstboot appends AUXINUX_INITIAL_ADMIN_PASSWORD to the API .env so
+#  the API can seed the admin account when it initialises its database. Once
+#  that is done the plaintext password has no purpose; this one-shot removes it.
+#  Safe to run any time: it only acts once the API is up and its DB exists.
+# =============================================================================
+set -euo pipefail
+
+ENV_FILE="/opt/auxinux-virtua/apps/api/.env"
+DB_DIR="/var/lib/auxinuxvirtual/db"
+API_URL="http://127.0.0.1:8441/"
+TIMEOUT="${VIRTUAOS_SEED_CLEANUP_TIMEOUT:-300}"
+
+log() { echo "[VirtuaOS-seed-cleanup] $*"; }
+
+if [[ ! -f "${ENV_FILE}" ]] || ! grep -q '^AUXINUX_INITIAL_ADMIN_PASSWORD=' "${ENV_FILE}"; then
+    log "nothing to clean."
+    exit 0
+fi
+
+# Wait until the API answers and its database has been created (= the admin
+# account has been seeded from the .env value).
+waited=0
+until curl -s -o /dev/null -m 5 "${API_URL}" \
+      && [[ -n "$(find "${DB_DIR}" -mindepth 1 -maxdepth 1 -type f -size +0 2>/dev/null | head -1)" ]]; do
+    if (( waited >= TIMEOUT )); then
+        log "API/DB not ready after ${TIMEOUT}s — leaving .env untouched (will retry next boot)."
+        exit 0
+    fi
+    sleep 5
+    waited=$(( waited + 5 ))
+done
+
+tmp="$(mktemp "${ENV_FILE}.XXXXXX")"
+grep -v '^AUXINUX_INITIAL_ADMIN_PASSWORD=' "${ENV_FILE}" > "${tmp}" || true
+chmod --reference="${ENV_FILE}" "${tmp}"
+chown --reference="${ENV_FILE}" "${tmp}"
+mv -f "${tmp}" "${ENV_FILE}"
+rm -f /etc/virtuaos/admin-password.seed
+log "initial admin password removed from ${ENV_FILE}."

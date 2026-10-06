@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  VirtuaOS 1.0.0 — ISO Builder
+#  VirtuaOS — ISO Builder (version: VIRTUAOS_VERSION below)
 #  Builds a bootable x86_64 ISO based on Debian 13 (Trixie) with
 #  AuxiNux Virtua Control pre-bundled and auto-configured on first boot.
 #
@@ -16,7 +16,7 @@
 # =============================================================================
 set -euo pipefail
 
-VIRTUAOS_VERSION="1.0.3-BETA"
+VIRTUAOS_VERSION="1.0.4-BETA"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VIRTUA_SOURCE_DIR="${VIRTUA_SOURCE_DIR:-${SCRIPT_DIR}/../Virtua}"
 PROJECT_ROOT="$(cd "${VIRTUA_SOURCE_DIR}" 2>/dev/null && pwd || true)"
@@ -843,7 +843,7 @@ if [[ -f "${OUTPUT_ISO}" ]]; then
     echo "  • Live shell              (boots without installing)"
     echo ""
     echo "  After install + first boot, Virtua is available at:"
-    echo "  http://<SERVER-IP>:8441  —  admin / admin123"
+    echo "  http://<SERVER-IP>:8441  —  admin / <password chosen during install>"
     echo ""
 else
     err "Build completed but ISO file was not found at ${OUTPUT_ISO}"

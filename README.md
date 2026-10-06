@@ -26,7 +26,7 @@ en quelques minutes. Il embarque :
 - Une installation **100 % hors ligne** : tout est déjà dans l'ISO.
 
 Après l'installation et le premier démarrage, le panneau est disponible sur :
-- `http://<IP>:8441` — identifiants par défaut `admin` / `admin123`
+- `http://<IP>:8441` — utilisateur `admin`, mot de passe choisi pendant l'installation
 
 ## Canaux de distribution
 
@@ -39,6 +39,21 @@ VirtuaOS est distribué via **deux canaux de mise à jour** :
 
 Le canal **Normal** est destiné à la communauté. Le canal **DEV** permet d'accéder
 aux versions en cours de validation avant leur passage en stable.
+
+Sur un hôte VirtuaOS, le canal est choisi dans `/etc/virtuaos/channel` (partagé
+avec le panneau Virtua) :
+
+```bash
+vos channel                 # afficher les canaux + le noyau actif
+vos channel os dev          # releases VirtuaOS depuis /VIRTUAOS/DEV/
+vos channel kernel prod     # noyau : suite APT kernel (kernel-virtua) ou kernel-dev
+vos os upgrade              # applique la dernière release du canal (manifeste signé)
+```
+
+## Pare-feu
+
+Politique `INPUT DROP` ; ports ouverts : 22, 80, 443, 8441 + bridges invités.
+Configuration : `/etc/virtuaos/firewall.conf` puis `sudo virtuaos-firewall apply`.
 
 
 ## Construire l'ISO
@@ -158,7 +173,7 @@ minutes. It ships:
 - A **fully offline** installation: everything is already inside the ISO.
 
 After install + first boot, the panel is available at:
-- `http://<IP>:8441` — default credentials `admin` / `admin123`
+- `http://<IP>:8441` — user `admin`, password chosen during installation
 
 ## Distribution channels
 
@@ -171,6 +186,21 @@ VirtuaOS is distributed through **two update channels**:
 
 The **Normal** channel targets the community. The **DEV** channel gives access
 to releases being validated before they move to stable.
+
+On a VirtuaOS host the channel lives in `/etc/virtuaos/channel` (shared with the
+Virtua panel):
+
+```bash
+vos channel                 # show channels + running kernel
+vos channel os dev          # VirtuaOS releases from /VIRTUAOS/DEV/
+vos channel kernel prod     # kernel: APT suite kernel (kernel-virtua) or kernel-dev
+vos os upgrade              # apply the channel's latest release (signed manifest)
+```
+
+## Firewall
+
+`INPUT DROP` policy; open ports: 22, 80, 443, 8441 + guest bridges.
+Configure `/etc/virtuaos/firewall.conf`, then `sudo virtuaos-firewall apply`.
 
 ## Building the ISO
 

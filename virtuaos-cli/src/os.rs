@@ -5,7 +5,15 @@
 //! [`UpgradeInstruction`]). This lets a VirtuaOS release ship apt package
 //! changes, file replacements, one-off scripts and shell commands without
 //! requiring a new `virtuaos-cli` build for every release.
+//!
+//! The release tree follows the VirtuaOS channel (`/etc/virtuaos/channel`):
+//! PROD → `dep.auxinux.ca/VIRTUAOS/`, DEV → `dep.auxinux.ca/VIRTUAOS/DEV/`.
+//! Every `upgrade.instruction` must come with a detached OpenPGP signature
+//! (`upgrade.instruction.asc`) made with the repository key; unsigned or badly
+//! signed manifests are refused unless `--allow-unsigned` is given.
 
+use crate::channel::{self, Channel};
+use crate::version::{self, compare as compare_versions, extract_version};
 use anyhow::{bail, Context, Result};
 use owo_colors::OwoColorize;
 use serde::Deserialize;
@@ -16,10 +24,18 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Markdown file listing the latest published VirtuaOS version.
-const RELEASE_MD_URL: &str = "https://dep.auxinux.ca/VIRTUAOS/release.md";
-/// Base URL under which each release's `upgrade.instruction` and assets live.
-const RELEASE_BASE_URL: &str = "https://dep.auxinux.ca/VIRTUAOS";
+/// Repository signing key (same key as the APT repo) used to verify manifests.
+const KEYRING: &str = "/usr/share/keyrings/virtua-archive-keyring.asc";
+
+/// `release.md` of a channel (lists the latest published version).
+fn release_md_url(ch: Channel) -> String {
+    format!("{}/release.md", ch.release_base_url())
+}
+
+/// Base URL of one release (folder = numeric version, e.g. `.../DEV/1.0.4`).
+fn release_url(ch: Channel, version: &str) -> String {
+    format!("{}/{}", ch.release_base_url(), version::numeric(version))
+}
 
 /// Parsed key/value pairs from `/etc/os-release` (the standard
 /// freedesktop.org file describing the running distribution).
@@ -64,13 +80,15 @@ struct UpgradeInstruction {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FileInstruction {
-    /// Source URL; defaults to `RELEASE_BASE_URL/<version>/<dest>` when omitted.
+    /// Source URL; defaults to `<channel release URL>/<version>/<dest>` when omitted.
     url: Option<String>,
     /// Destination path on the host. `dest` is an alias for `path`.
     path: Option<String>,
     dest: Option<String>,
     /// Optional `chmod` mode string (e.g. `"0755"`) applied after install.
     mode: Option<String>,
+    /// Optional expected SHA-256 (hex) of the downloaded file.
+    sha256: Option<String>,
 }
 
 /// A helper script to download and execute once, then discard.
@@ -84,6 +102,8 @@ struct DownloadedScriptInstruction {
     cwd: Option<String>,
     mode: Option<String>,
     description: Option<String>,
+    /// Optional expected SHA-256 (hex) of the downloaded script.
+    sha256: Option<String>,
 }
 
 /// A raw shell command to run via `bash -lc`.
@@ -118,19 +138,16 @@ fn os_release() -> Result<OsRelease> {
     Ok(OsRelease { fields })
 }
 
-/// Confirm the host is actually VirtuaOS before touching anything.
-/// Checks the `/etc/os-release` `ID`/`NAME` fields as well as the
-/// `/etc/virtuaos-release` marker file, since either can be present
-/// depending on how the release was branded.
+/// Confirm the host is actually VirtuaOS before touching anything. Uses the
+/// `/etc/virtuaos-version` / `/etc/virtuaos-release` markers first: a
+/// base-files upgrade can reset `/etc/os-release` to Debian.
 fn ensure_virtuaos() -> Result<OsRelease> {
-    let rel = os_release()?;
-    let id = rel.field("ID").to_lowercase();
-    let name = format!("{} {}", rel.field("NAME"), rel.field("PRETTY_NAME")).to_lowercase();
-    if id == "virtuaos" || name.contains("virtuaos") || Path::new("/etc/virtuaos-release").exists()
-    {
-        return Ok(rel);
+    if !channel::is_virtuaos() {
+        bail!("`virtuaos os` is not available on this distribution; this host is not VirtuaOS");
     }
-    bail!("`virtuaos os` is not available on this distribution; this host is not VirtuaOS");
+    Ok(os_release().unwrap_or(OsRelease {
+        fields: HashMap::new(),
+    }))
 }
 
 impl OsRelease {
@@ -138,11 +155,10 @@ impl OsRelease {
         self.fields.get(key).cloned().unwrap_or_default()
     }
 
-    /// Best-effort detection of the installed VirtuaOS version. Prefers the
-    /// dedicated `/etc/virtuaos-version` stamp file (kept in sync by
-    /// `virtuaos apply-branding`, see `branding.rs`) and falls back to
-    /// scanning standard `/etc/os-release` fields, then finally `"0.0.0"`
-    /// if nothing looks like a version number.
+    /// Best-effort detection of the installed VirtuaOS version (pre-release
+    /// suffix included). Prefers the `/etc/virtuaos-version` marker written by
+    /// the installer / `upgrade.instruction`, falls back to `/etc/os-release`
+    /// fields, then finally `"0.0.0"`.
     fn installed_version(&self) -> String {
         if let Ok(version) = fs::read_to_string("/etc/virtuaos-version") {
             if let Some(version) = extract_version(version.trim()) {
@@ -163,10 +179,12 @@ impl OsRelease {
 pub fn status() -> Result<()> {
     let rel = ensure_virtuaos()?;
     let installed = rel.installed_version();
+    let ch = channel::read().virtuaos;
     println!("{}", "── VirtuaOS release ──────────────────────".dimmed());
     println!("  {:<12} {}", "installed", installed.bold());
+    println!("  {:<12} {}", "branch", ch.badge());
 
-    let remote = fetch_release_info()?;
+    let remote = fetch_release_info(ch)?;
     println!("  {:<12} {}", "available", remote.latest.bold());
 
     match compare_versions(&installed, &remote.latest) {
@@ -186,7 +204,7 @@ pub fn status() -> Result<()> {
         None => println!(
             "\n{} could not compare versions; check {}",
             "?".yellow(),
-            RELEASE_MD_URL
+            release_md_url(ch)
         ),
     }
     Ok(())
@@ -196,19 +214,43 @@ pub fn status() -> Result<()> {
 /// manifest and apply it. `target_version` pins a specific release instead
 /// of "latest"; `reapply` forces re-running the manifest even when the host
 /// is already on the target version (useful to refresh branding/files after
-/// a manual fix); `yes` skips the confirmation prompt.
-pub fn upgrade(target_version: Option<String>, reapply: bool, yes: bool) -> Result<()> {
+/// a manual fix); `yes` skips the confirmation prompt; `allow_unsigned`
+/// accepts a manifest without a valid signature (strongly discouraged).
+pub fn upgrade(
+    target_version: Option<String>,
+    reapply: bool,
+    yes: bool,
+    allow_unsigned: bool,
+) -> Result<()> {
     require_root()?;
     let rel = ensure_virtuaos()?;
     let installed = rel.installed_version();
+    let ch = channel::read().virtuaos;
     let target = match target_version {
         Some(v) => v,
-        None => fetch_release_info()?.latest,
+        None => fetch_release_info(ch)?.latest,
     };
+    // The version ends up in a URL and a /tmp path: accept only a plain version.
+    if !version::is_valid(&target) {
+        bail!("invalid target version `{target}` (expected e.g. 1.0.4 or 1.0.4-BETA)");
+    }
 
     println!("{}", "── VirtuaOS upgrade ──────────────────────".dimmed());
     println!("  {:<12} {}", "installed", installed.bold());
     println!("  {:<12} {}", "target", target.bold());
+    println!("  {:<12} {}", "branch", ch.badge());
+
+    // Downgrades are not supported: a manifest only knows how to move forward
+    // (e.g. after `vos channel os prod`, PROD may still be behind a DEV BETA).
+    if compare_versions(&installed, &target) == Some(Ordering::Greater) {
+        println!(
+            "\n{} installed {} is newer than {} — downgrades are not supported; nothing applied.",
+            "ℹ".blue(),
+            installed,
+            target
+        );
+        return Ok(());
+    }
 
     if compare_versions(&installed, &target) == Some(Ordering::Equal) && !reapply {
         println!("\n{} VirtuaOS is already at {}", "✓".green(), target);
@@ -234,9 +276,30 @@ pub fn upgrade(target_version: Option<String>, reapply: bool, yes: bool) -> Resu
     }
 
     let workdir = prepare_workdir(&target)?;
-    let instruction_url = format!("{RELEASE_BASE_URL}/{target}/upgrade.instruction");
+    let base = release_url(ch, &target);
+    let instruction_url = format!("{base}/upgrade.instruction");
     let instruction_path = workdir.join("upgrade.instruction");
     download(&instruction_url, &instruction_path)?;
+
+    // Authenticity: the manifest runs commands as root, so it must be signed
+    // with the repository key (same trust as apt).
+    let sig_path = workdir.join("upgrade.instruction.asc");
+    let verified = download(&format!("{instruction_url}.asc"), &sig_path)
+        .and_then(|_| verify_signature(&instruction_path, &sig_path));
+    match verified {
+        Ok(()) => println!("  {:<12} {}", "signature", "valid".green()),
+        Err(e) if allow_unsigned => {
+            println!(
+                "  {:<12} {} ({e}) — continuing because of --allow-unsigned",
+                "signature",
+                "NOT VERIFIED".red()
+            );
+        }
+        Err(e) => bail!(
+            "refusing unsigned/invalid upgrade.instruction: {e}\n\
+             (publish {instruction_url}.asc, or rerun with --allow-unsigned at your own risk)"
+        ),
+    }
 
     let instruction_text = fs::read_to_string(&instruction_path)
         .with_context(|| format!("cannot read {}", instruction_path.display()))?;
@@ -246,23 +309,98 @@ pub fn upgrade(target_version: Option<String>, reapply: bool, yes: bool) -> Resu
     // Guard against a manifest served for the wrong version (e.g. a stale
     // CDN cache or a copy/paste mistake when publishing the release).
     if let Some(version) = &instruction.version {
-        if version != &target {
+        if version != &target && version::numeric(version) != version::numeric(&target) {
             bail!("upgrade.instruction version mismatch: expected {target}, got {version}");
         }
     }
 
-    apply_instruction(&target, &workdir, instruction)?;
+    apply_instruction(&base, &workdir, instruction)?;
+    // Re-render os-release / issue from the (possibly new) version marker.
+    if let Err(e) = crate::branding::apply() {
+        eprintln!("  {} branding refresh skipped: {e}", "warn".yellow());
+    }
     println!("\n{} VirtuaOS upgrade instructions applied.", "✓".green());
     println!("Run {} to verify.", "vos os status".bold());
     Ok(())
 }
 
-/// Fetch and parse `release.md` to find the latest published version.
-fn fetch_release_info() -> Result<ReleaseInfo> {
-    let text = fetch_text(RELEASE_MD_URL)?;
+/// Fetch and parse the channel's `release.md` to find the latest version.
+fn fetch_release_info(ch: Channel) -> Result<ReleaseInfo> {
+    let url = release_md_url(ch);
+    let text = fetch_text(&url)?;
     let latest = parse_latest_version(&text)
-        .with_context(|| format!("cannot find a release version in {RELEASE_MD_URL}"))?;
+        .with_context(|| format!("cannot find a release version in {url}"))?;
     Ok(ReleaseInfo { latest })
+}
+
+/// Verify a detached signature with the repository key. Uses `sqv` (what apt
+/// itself uses on Debian 13, reads the armored key directly) and falls back to
+/// `gpgv` with a dearmored copy of the key.
+fn verify_signature(data: &Path, sig: &Path) -> Result<()> {
+    if !Path::new(KEYRING).exists() {
+        bail!("repository key {KEYRING} not found");
+    }
+    if let Ok(out) = Command::new("sqv")
+        .arg("--keyring")
+        .arg(KEYRING)
+        .arg(sig)
+        .arg(data)
+        .output()
+    {
+        if out.status.success() {
+            return Ok(());
+        }
+        bail!(
+            "bad signature (sqv: {})",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let dearmored = sig.with_extension("keyring.gpg");
+    let ok = Command::new("gpg")
+        .args(["--batch", "--yes", "--dearmor", "-o"])
+        .arg(&dearmored)
+        .arg(KEYRING)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        bail!("neither sqv nor gpg is available to verify the signature");
+    }
+    let out = Command::new("gpgv")
+        .arg("--keyring")
+        .arg(&dearmored)
+        .arg(sig)
+        .arg(data)
+        .output()
+        .context("failed to launch gpgv")?;
+    if !out.status.success() {
+        bail!(
+            "bad signature (gpgv: {})",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// Check a downloaded file against an expected SHA-256 (hex), if one is given.
+fn check_sha256(path: &Path, expected: Option<&str>) -> Result<()> {
+    let Some(expected) = expected else { return Ok(()) };
+    let out = Command::new("sha256sum")
+        .arg(path)
+        .output()
+        .context("failed to launch sha256sum")?;
+    let got = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !out.status.success() || got != expected.trim().to_ascii_lowercase() {
+        bail!(
+            "sha256 mismatch for {}: expected {expected}, got {got}",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 /// `release.md` is free-form prose, not structured data. Prefer a version
@@ -286,61 +424,6 @@ fn parse_latest_version(text: &str) -> Option<String> {
     text.lines().find_map(extract_version)
 }
 
-/// Scan `text` for the first substring that looks like a dotted version
-/// number (at least one digit, one `.`, e.g. `1.0`, `1.2.3`) and return it.
-/// Used to pull a version out of otherwise free-form strings such as
-/// `PRETTY_NAME="VirtuaOS 1.2.3"` or a `release.md` sentence.
-fn extract_version(text: &str) -> Option<String> {
-    let bytes = text.as_bytes();
-    for start in 0..bytes.len() {
-        if !bytes[start].is_ascii_digit() {
-            continue;
-        }
-        let mut end = start;
-        let mut dots = 0;
-        while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b'.') {
-            if bytes[end] == b'.' {
-                dots += 1;
-            }
-            end += 1;
-        }
-        if dots >= 1 {
-            return Some(text[start..end].trim_end_matches('.').to_string());
-        }
-    }
-    None
-}
-
-/// Compare two version strings component-by-component as integers (so `2.9`
-/// < `2.10`, unlike a plain string comparison). Missing trailing components
-/// are treated as `0` (`1.2` == `1.2.0`). Returns `None` if either string
-/// doesn't contain a parseable version.
-fn compare_versions(a: &str, b: &str) -> Option<Ordering> {
-    let av = parse_version_parts(a)?;
-    let bv = parse_version_parts(b)?;
-    let len = av.len().max(bv.len());
-    for i in 0..len {
-        let left = *av.get(i).unwrap_or(&0);
-        let right = *bv.get(i).unwrap_or(&0);
-        match left.cmp(&right) {
-            Ordering::Equal => {}
-            ord => return Some(ord),
-        }
-    }
-    Some(Ordering::Equal)
-}
-
-/// Split a version string into its numeric dot-separated components.
-fn parse_version_parts(version: &str) -> Option<Vec<u64>> {
-    let version = extract_version(version).unwrap_or_else(|| version.to_string());
-    let parts: Option<Vec<u64>> = version
-        .split('.')
-        .filter(|p| !p.is_empty())
-        .map(|p| p.parse::<u64>().ok())
-        .collect();
-    parts.filter(|v| !v.is_empty())
-}
-
 /// Create a fresh, empty scratch directory for downloading a given release's
 /// manifest and assets. Namespaced by version and PID so concurrent/retried
 /// upgrades don't collide, and wiped first in case a previous run left it dirty.
@@ -360,7 +443,7 @@ fn prepare_workdir(version: &str) -> Result<PathBuf> {
 /// apt update -> full-upgrade -> install -> remove -> files/downloads ->
 /// downloaded scripts -> commands -> reboot notice. Each step is a no-op if
 /// its field is absent, so a manifest only pays for what it declares.
-fn apply_instruction(version: &str, workdir: &Path, instruction: UpgradeInstruction) -> Result<()> {
+fn apply_instruction(base: &str, workdir: &Path, instruction: UpgradeInstruction) -> Result<()> {
     if let Some(messages) = instruction.messages {
         for message in messages {
             println!("{} {}", "ℹ".blue(), message);
@@ -369,29 +452,29 @@ fn apply_instruction(version: &str, workdir: &Path, instruction: UpgradeInstruct
 
     if instruction.apt_update.unwrap_or(false) {
         println!("\n{}", "→ Refreshing apt indexes…".bold());
-        run_inherit("apt-get", &["update".to_string()])?;
+        run_apt(&["update"])?;
     }
 
     if instruction.apt_full_upgrade.unwrap_or(false) {
         println!("\n{}", "→ Applying apt full-upgrade…".bold());
-        run_inherit("apt-get", &["full-upgrade".to_string(), "-y".to_string()])?;
+        run_apt(&["full-upgrade", "-y"])?;
     }
 
     if let Some(pkgs) = instruction.apt_install {
         if !pkgs.is_empty() {
             println!("\n{}", "→ Installing required packages…".bold());
-            let mut args = vec!["install".to_string(), "-y".to_string()];
-            args.extend(pkgs);
-            run_inherit("apt-get", &args)?;
+            let mut args = vec!["install", "-y"];
+            args.extend(pkgs.iter().map(|s| s.as_str()));
+            run_apt(&args)?;
         }
     }
 
     if let Some(pkgs) = instruction.apt_remove {
         if !pkgs.is_empty() {
             println!("\n{}", "→ Removing obsolete packages…".bold());
-            let mut args = vec!["remove".to_string(), "-y".to_string()];
-            args.extend(pkgs);
-            run_inherit("apt-get", &args)?;
+            let mut args = vec!["remove", "-y"];
+            args.extend(pkgs.iter().map(|s| s.as_str()));
+            run_apt(&args)?;
         }
     }
 
@@ -401,7 +484,7 @@ fn apply_instruction(version: &str, workdir: &Path, instruction: UpgradeInstruct
         .into_iter()
         .chain(instruction.downloads.unwrap_or_default())
     {
-        apply_file(version, workdir, file)?;
+        apply_file(base, workdir, file)?;
     }
 
     if let Some(scripts) = instruction.downloaded_scripts {
@@ -456,6 +539,7 @@ fn apply_downloaded_script(workdir: &Path, script: DownloadedScriptInstruction) 
     }
 
     download(&script.url, &local_path)?;
+    check_sha256(&local_path, script.sha256.as_deref())?;
 
     let mode = script.mode.unwrap_or_else(|| "0755".to_string());
     run_inherit("chmod", &[mode, local_path.display().to_string()])?;
@@ -497,17 +581,14 @@ fn apply_downloaded_script(workdir: &Path, script: DownloadedScriptInstruction) 
 /// copy it into place at `dest` (creating parent directories as needed) and
 /// apply an optional `chmod` mode. Downloading to a temp path first avoids
 /// leaving a half-written file at `dest` if the transfer fails midway.
-fn apply_file(version: &str, workdir: &Path, file: FileInstruction) -> Result<()> {
+fn apply_file(base: &str, workdir: &Path, file: FileInstruction) -> Result<()> {
     let dest = file
         .path
         .or(file.dest)
         .context("file instruction requires `path` or `dest`")?;
-    let url = file.url.unwrap_or_else(|| {
-        format!(
-            "{RELEASE_BASE_URL}/{version}/{}",
-            dest.trim_start_matches('/')
-        )
-    });
+    let url = file
+        .url
+        .unwrap_or_else(|| format!("{base}/{}", dest.trim_start_matches('/')));
     let filename = Path::new(&dest)
         .file_name()
         .and_then(|s| s.to_str())
@@ -516,6 +597,7 @@ fn apply_file(version: &str, workdir: &Path, file: FileInstruction) -> Result<()
 
     println!("{} {} -> {}", "→".cyan(), url, dest);
     download(&url, &tmp)?;
+    check_sha256(&tmp, file.sha256.as_deref())?;
 
     if let Some(parent) = Path::new(&dest).parent() {
         fs::create_dir_all(parent)
@@ -552,6 +634,27 @@ fn download(url: &str, dest: &Path) -> Result<()> {
         .with_context(|| format!("failed to launch curl for {url}"))?;
     if !status.success() {
         bail!("failed to download {url}");
+    }
+    Ok(())
+}
+
+/// Run apt-get non-interactively, keeping locally modified conffiles
+/// (/etc/issue, /etc/issue.net… are base-files conffiles VirtuaOS rebrands).
+fn run_apt(args: &[&str]) -> Result<()> {
+    let mut full: Vec<String> = vec![
+        "-o".into(),
+        "Dpkg::Options::=--force-confdef".into(),
+        "-o".into(),
+        "Dpkg::Options::=--force-confold".into(),
+    ];
+    full.extend(args.iter().map(|s| s.to_string()));
+    let status = Command::new("apt-get")
+        .args(&full)
+        .env("DEBIAN_FRONTEND", "noninteractive")
+        .status()
+        .context("failed to launch `apt-get`")?;
+    if !status.success() {
+        bail!("`apt-get {}` exited with {status}", args.join(" "));
     }
     Ok(())
 }

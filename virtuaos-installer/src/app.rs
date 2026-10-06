@@ -1,6 +1,6 @@
 //! The wizard: state machine, key handling, and ratatui rendering.
 
-use crate::install::{read_progress, spawn_backend, write_conf, Progress};
+use crate::install::{read_progress, spawn_backend, stop_backend, write_conf, Progress};
 use crate::model::{
     cidr_ok, detect_disks, detect_ifaces, dns_list_ok, hostname_ok, ip_ok, password_ok, scan_wifi,
     Answers, Choice, Disk, NetIface, WifiNet, KEYMAPS, LOCALES, NET_METHODS, TIMEZONES, UI_LANGS,
@@ -257,6 +257,12 @@ impl App {
     /// always quits, regardless of step.
     pub fn on_key(&mut self, key: KeyEvent) -> Action {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            // Never leave the backend running headless behind us (the live
+            // .bash_profile would then start a second installer in parallel).
+            if self.step == Step::Installing {
+                self.abort_install();
+                return Action::None;
+            }
             return Action::Quit;
         }
         match self.step {
@@ -317,7 +323,12 @@ impl App {
                         }
                     }
                     Step::Locale => self.ans.lang_code = LOCALES[self.sel].value.to_string(),
-                    Step::Keyboard => self.ans.keymap = KEYMAPS[self.sel].value.to_string(),
+                    Step::Keyboard => {
+                        self.ans.keymap = KEYMAPS[self.sel].value.to_string();
+                        // Switch the console layout NOW so the passwords typed
+                        // later use the layout the installed system will have.
+                        apply_console_keymap(&self.ans.keymap);
+                    }
                     Step::Timezone => self.ans.tz = TIMEZONES[self.sel].value.to_string(),
                     Step::Disk => self.ans.disk = self.disks[self.sel].dev.clone(),
                     Step::NetIface => {
@@ -576,6 +587,21 @@ impl App {
                 self.enter_step(Step::Failed);
             }
         }
+    }
+
+    /// Ctrl-C while installing: stop the backend (SIGKILL + reap) and show the
+    /// failure screen. The disk is left partially written and must be reinstalled.
+    fn abort_install(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            stop_backend(&mut child);
+        }
+        self.fail_msg = self
+            .t(
+                "Installation interrupted (Ctrl-C). The target disk is incomplete — run the installer again.",
+                "Installation interrompue (Ctrl-C). Le disque cible est incomplet — relancez l'installation.",
+            )
+            .to_string();
+        self.enter_step(Step::Failed);
     }
 
     /// Called by the event loop on every tick while installing.
@@ -1208,5 +1234,46 @@ impl App {
             Paragraph::new(Span::styled(hint, theme::dim())).alignment(Alignment::Center),
             area,
         );
+    }
+}
+
+impl Drop for App {
+    /// Last line of defence (error return, unexpected exit): never orphan a
+    /// running backend.
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            stop_backend(&mut child);
+        }
+    }
+}
+
+/// Apply an installer keymap id to the live console: write the XKB layout to
+/// /etc/default/keyboard (live system only) and run `setupcon -k`, falling back
+/// to `loadkeys`. Mirrors apply_console_keymap() in the bash backend.
+fn apply_console_keymap(keymap: &str) {
+    use std::process::{Command, Stdio};
+    let (layout, variant) = match keymap {
+        "pt-br" => ("br", ""),
+        "ca-multix" => ("ca", "multix"),
+        "ca" => ("ca", "fr"),
+        other => (other.split('-').next().unwrap_or(other), ""),
+    };
+    let conf = format!(
+        "XKBMODEL=\"pc105\"\nXKBLAYOUT=\"{layout}\"\nXKBVARIANT=\"{variant}\"\nXKBOPTIONS=\"\"\nBACKSPACE=\"guess\"\n"
+    );
+    let _ = std::fs::write("/etc/default/keyboard", conf);
+    let ok = Command::new("setupcon")
+        .args(["-k", "--force"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        let _ = Command::new("loadkeys")
+            .arg(keymap)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }

@@ -7,12 +7,17 @@ use anyhow::{Context, Result};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 
 pub const CONF_PATH: &str = "/run/virtuaos-install.conf";
 pub const PROGRESS_PATH: &str = "/run/virtuaos-install.progress";
 pub const BACKEND_BIN: &str = "/usr/local/sbin/virtuaos-install";
 pub const LOG_PATH: &str = "/var/log/virtuaos-install.log";
+/// Created once the backend has been launched. The live `.bash_profile` only
+/// falls back to the bash wizard when this marker is ABSENT, so a TUI that
+/// exits after starting an install never triggers a second, parallel install.
+pub const STARTED_MARKER: &str = "/run/virtuaos-install.started";
 
 /// Terminal install state parsed from the progress file.
 #[derive(Clone, Default)]
@@ -45,6 +50,7 @@ pub fn write_conf(ans: &Answers) -> Result<()> {
 pub fn spawn_backend() -> Result<Child> {
     // Reset the progress file so a stale one from a previous run isn't read.
     let _ = fs::remove_file(PROGRESS_PATH);
+    let _ = fs::write(STARTED_MARKER, b"");
 
     let log = OpenOptions::new()
         .create(true)
@@ -54,7 +60,10 @@ pub fn spawn_backend() -> Result<Child> {
         .context("opening install log")?;
     let log_err = log.try_clone().context("cloning log handle")?;
 
+    // Own process group so an abort can stop the WHOLE tree (rsync, mkfs,
+    // grub-install…), not just the bash parent.
     let child = Command::new(BACKEND_BIN)
+        .process_group(0)
         .arg("--backend")
         .arg(format!("--conf={CONF_PATH}"))
         .env("VIRTUAOS_INSTALL_PROGRESS", PROGRESS_PATH)
@@ -81,4 +90,29 @@ pub fn read_progress() -> Option<Progress> {
         }
     }
     Some(p)
+}
+
+/// Stop a running backend and everything it spawned (its process group):
+/// SIGTERM, a short grace period, then SIGKILL; reap it and release the
+/// target mounts so a retry does not hit "device busy".
+pub fn stop_backend(child: &mut Child) {
+    let pgid = child.id() as libc::pid_t;
+    unsafe {
+        libc::kill(-pgid, libc::SIGTERM);
+    }
+    for _ in 0..30 {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    unsafe {
+        libc::kill(-pgid, libc::SIGKILL);
+    }
+    let _ = child.wait();
+    let _ = Command::new("umount")
+        .args(["-lR", "/mnt/target"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }

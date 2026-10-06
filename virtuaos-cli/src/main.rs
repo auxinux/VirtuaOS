@@ -7,6 +7,7 @@
 //! comes in a later phase.
 
 mod branding;
+mod channel;
 mod docker;
 mod network;
 mod os;
@@ -15,6 +16,7 @@ mod setup;
 mod system;
 mod update;
 mod vdm;
+mod version;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -57,6 +59,11 @@ enum Command {
         #[command(subcommand)]
         cmd: Option<NetworkCmd>,
     },
+    /// Show or switch the PROD/DEV update channels (VirtuaOS releases, kernel).
+    Channel {
+        #[command(subcommand)]
+        cmd: Option<ChannelCmd>,
+    },
     /// Manage VirtuaOS image/release upgrades.
     Os {
         #[command(subcommand)]
@@ -77,9 +84,8 @@ enum Command {
         #[command(subcommand)]
         cmd: Option<ServicesCmd>,
     },
-    /// (internal) Stamp this cli's VirtuaOS release onto /etc/os-release + issue.
-    /// Run by the virtuaos-cli package postinst so `virtuaos update` promotes the
-    /// host's version when the cli is upgraded.
+    /// (internal) Render /etc/os-release + issue from the /etc/virtuaos-version
+    /// marker (never changes the version). Run by the virtuaos-cli postinst.
     #[command(name = "apply-branding", hide = true)]
     ApplyBranding,
 }
@@ -90,6 +96,44 @@ enum NetworkCmd {
     Status,
     /// Interactive wizard: pick a NIC, join WiFi, choose DHCP or a static IP.
     Config,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ChannelArg {
+    Prod,
+    Dev,
+}
+
+impl From<ChannelArg> for channel::Channel {
+    fn from(c: ChannelArg) -> Self {
+        match c {
+            ChannelArg::Prod => channel::Channel::Prod,
+            ChannelArg::Dev => channel::Channel::Dev,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum ChannelCmd {
+    /// Show both channels and the running kernel (default).
+    Show,
+    /// VirtuaOS release branch used by `vos os upgrade` (prod | dev).
+    Os {
+        #[arg(value_enum)]
+        channel: ChannelArg,
+        /// Do not ask for confirmation.
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+    /// Kernel channel: switches the APT suite (kernel | kernel-dev) and the
+    /// meta-package (kernel-virtua | kernel-virtua-dev); PROD purges DEV kernels.
+    Kernel {
+        #[arg(value_enum)]
+        channel: ChannelArg,
+        /// Do not ask for confirmation.
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -107,6 +151,9 @@ enum OsCmd {
         /// Apply without the confirmation prompt.
         #[arg(short = 'y', long)]
         yes: bool,
+        /// Accept an upgrade.instruction without a valid signature (dangerous).
+        #[arg(long)]
+        allow_unsigned: bool,
     },
     /// Alias for upgrade.
     Update {
@@ -119,6 +166,9 @@ enum OsCmd {
         /// Apply without the confirmation prompt.
         #[arg(short = 'y', long)]
         yes: bool,
+        /// Accept an upgrade.instruction without a valid signature (dangerous).
+        #[arg(long)]
+        allow_unsigned: bool,
     },
 }
 
@@ -227,10 +277,13 @@ enum DockerCmd {
 enum ServicesCmd {
     /// List the Virtua stack services and their state (default).
     List,
-    /// Restart a service, or the whole stack when no unit is given.
+    /// Restart a service, or the whole stack when no unit is given (asks first).
     Restart {
         /// systemd unit name (e.g. auxinuxvirtual-api).
         unit: Option<String>,
+        /// Do not ask for confirmation when restarting the whole stack.
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
     /// Show detailed status of one service.
     Status {
@@ -247,18 +300,25 @@ fn main() -> Result<()> {
         Command::Update { check, yes } => update::run(check, yes),
         Command::Setup { once } => setup::run(once),
         Command::Network { cmd } => network::run(matches!(cmd, Some(NetworkCmd::Config))),
+        Command::Channel { cmd } => match cmd.unwrap_or(ChannelCmd::Show) {
+            ChannelCmd::Show => channel::show(),
+            ChannelCmd::Os { channel: c, yes } => channel::set_os(c.into(), yes),
+            ChannelCmd::Kernel { channel: c, yes } => channel::set_kernel(c.into(), yes),
+        },
         Command::Os { cmd } => match cmd.unwrap_or(OsCmd::Status) {
             OsCmd::Status => os::status(),
             OsCmd::Upgrade {
                 target,
                 reapply,
                 yes,
+                allow_unsigned,
             }
             | OsCmd::Update {
                 target,
                 reapply,
                 yes,
-            } => os::upgrade(target, reapply, yes),
+                allow_unsigned,
+            } => os::upgrade(target, reapply, yes, allow_unsigned),
         },
         Command::Vdm { cmd } => match cmd.unwrap_or(VdmCmd::Status) {
             VdmCmd::Install { ha, bridge, ipv4, gateway } => {
@@ -286,7 +346,7 @@ fn main() -> Result<()> {
         },
         Command::Services { cmd } => match cmd.unwrap_or(ServicesCmd::List) {
             ServicesCmd::List => services::list(),
-            ServicesCmd::Restart { unit } => services::restart(unit.as_deref()),
+            ServicesCmd::Restart { unit, yes } => services::restart(unit.as_deref(), yes),
             ServicesCmd::Status { unit } => services::status(&unit),
         },
         Command::ApplyBranding => branding::apply(),

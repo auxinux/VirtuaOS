@@ -23,7 +23,9 @@ for grp in libvirt libvirt-qemu kvm docker lxd; do
         usermod -aG "$grp" "${USER_NAME}" 2>/dev/null || true
 done
 
-# Sudoers: virtua can sudo without password (convenient for installer + admin)
+# Sudoers: virtua can sudo without password in the LIVE environment only
+# (installer). virtuaos-install excludes this file from the copy and removes it
+# from the target: on the installed system virtua uses sudo WITH its password.
 cat > /etc/sudoers.d/90-virtuaos-virtua <<EOF
 ${USER_NAME} ALL=(ALL) NOPASSWD: ALL
 Defaults:${USER_NAME} !authenticate
@@ -79,11 +81,16 @@ if [[ "$(tty)" == "/dev/tty1" ]]; then
         clear && reset
         # Prefer the Rust TUI front-end (virtuaos-installer); fall back to the
         # bash wizard if it's absent, fails to start, or vos_ui=text is set.
+        # Fall back ONLY if the TUI never launched an install: once the backend
+        # has started (marker below), a TUI exit must not start a second,
+        # parallel install on the same disk.
         if [[ -x /usr/local/sbin/virtuaos-installer ]] && \
            ! grep -q "vos_ui=text" /proc/cmdline 2>/dev/null; then
-            sudo /usr/local/sbin/virtuaos-installer \
-                || sudo /usr/local/sbin/virtuaos-install \
-                || true
+            if ! sudo /usr/local/sbin/virtuaos-installer; then
+                if [[ ! -e /run/virtuaos-install.started ]]; then
+                    sudo /usr/local/sbin/virtuaos-install || true
+                fi
+            fi
         else
             sudo /usr/local/sbin/virtuaos-install || true
         fi

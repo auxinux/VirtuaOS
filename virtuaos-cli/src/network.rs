@@ -222,6 +222,31 @@ fn config_wizard() -> Result<()> {
     let idx = choose("Network interface / Interface réseau:", &labels)?;
     let (dev, kind, _) = ifaces[idx].clone();
 
+    // Safety: reconfiguring a bridge port or the NIC carrying our SSH session
+    // cuts the host (and every guest on the bridge) off the network.
+    let mut risks: Vec<String> = Vec::new();
+    if let Some(master) = bridge_master(&dev) {
+        risks.push(format!(
+            "{dev} is a port of bridge `{master}` — configuring it directly breaks {master} (VMs/LXC on it lose network). Configure {master} instead."
+        ));
+    }
+    if carries_ssh(&dev) {
+        risks.push(format!(
+            "an SSH session is connected through {dev} — this session will drop while the link is reconfigured."
+        ));
+    }
+    if !risks.is_empty() {
+        println!();
+        for r in &risks {
+            println!("{} {r}", "⚠".yellow());
+        }
+        let ans = prompt("Continue anyway? / Continuer quand même ? [y/N] ")?;
+        if !matches!(ans.to_lowercase().as_str(), "y" | "yes" | "o" | "oui") {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
     let mut ssid = String::new();
     let mut wifi_pw = String::new();
 
@@ -301,6 +326,39 @@ fn config_wizard() -> Result<()> {
     println!("\n{} {}", "✓".green(), "Network applied and saved.".bold());
     println!("{}", "Run `virtuaos network` to verify.".dimmed());
     Ok(())
+}
+
+/// Name of the bridge `dev` is enslaved to, if any (`/sys/class/net/<dev>/master`).
+fn bridge_master(dev: &str) -> Option<String> {
+    std::fs::read_link(format!("/sys/class/net/{dev}/master"))
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+}
+
+/// Does an established SSH session use a local address of `dev`?
+/// (`ss` instead of $SSH_CONNECTION, which sudo strips.)
+fn carries_ssh(dev: &str) -> bool {
+    let Ok(ss) = Command::new("ss")
+        .args(["-Htn", "state", "established", "( sport = :22 )"])
+        .output()
+    else {
+        return false;
+    };
+    let Ok(addrs) = Command::new("ip").args(["-o", "addr", "show", "dev", dev]).output() else {
+        return false;
+    };
+    let addrs = String::from_utf8_lossy(&addrs.stdout).to_string();
+    String::from_utf8_lossy(&ss.stdout).lines().any(|l| {
+        let local = l.split_whitespace().nth(2).unwrap_or("");
+        let ip = local
+            .rsplit_once(':')
+            .map(|(ip, _)| ip)
+            .unwrap_or("")
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .trim_start_matches("::ffff:");
+        !ip.is_empty() && addrs.contains(&format!(" {ip}/"))
+    })
 }
 
 /// Create (or recreate) a dedicated `virtuaos-<dev>` NetworkManager

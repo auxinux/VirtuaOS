@@ -1,0 +1,12 @@
+[Unit]
+Description=VirtuaOS — remove the initial admin password from the Virtua .env
+After=auxinuxvirtual-api.service
+Wants=auxinuxvirtual-api.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/virtuaos-seed-cleanup
+StandardOutput=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,10 +1,30 @@
 # VirtuaOS OS Upgrade Format
 
-`vos os upgrade` reads a JSON file named `upgrade.instruction` from:
+`vos os upgrade` reads a JSON file named `upgrade.instruction` from the
+release tree of the host's VirtuaOS channel (`VIRTUAOS_CHANNEL` in
+`/etc/virtuaos/channel`, see `vos channel`):
 
 ```text
-https://dep.auxinux.ca/VIRTUAOS/<version>/upgrade.instruction
+PROD: https://dep.auxinux.ca/VIRTUAOS/<version>/upgrade.instruction
+DEV : https://dep.auxinux.ca/VIRTUAOS/DEV/<version>/upgrade.instruction
 ```
+
+`<version>` is the numeric folder (`1.0.4`), even for a pre-release
+(`latest: 1.0.4-BETA` in `release.md` → folder `1.0.4`).
+
+## Signature (required)
+
+Every `upgrade.instruction` must be published with a detached, ASCII-armored
+OpenPGP signature next to it: `upgrade.instruction.asc`, made with the
+repository key (`/usr/share/keyrings/virtua-archive-keyring.asc`, the key that
+signs the APT repo). The engine refuses a missing or invalid signature unless
+`--allow-unsigned` is given. Prepare + sign a release folder with:
+
+```bash
+releases/sign-release.sh 1.0.4 [GPG_KEY_ID]
+```
+
+It refreshes every `sha256` field from the local copies and writes the `.asc`.
 
 The file describes how to transform an installed VirtuaOS host into that
 target release without reinstalling from scratch.
@@ -14,10 +34,15 @@ target release without reinstalling from scratch.
 1. The upgrade runs as root.
 2. The engine only runs on VirtuaOS.
 3. The engine applies steps in a fixed order.
-4. The public release manifest is:
-   `https://dep.auxinux.ca/VIRTUAOS/release.md`
+4. The public release manifest is the channel's `release.md`:
+   `https://dep.auxinux.ca/VIRTUAOS/release.md` (PROD) or
+   `https://dep.auxinux.ca/VIRTUAOS/DEV/release.md` (DEV)
 5. The installed VirtuaOS version marker is read from:
-   `/etc/virtuaos-version`
+   `/etc/virtuaos-version` (full version, e.g. `1.0.4-BETA`). A pre-release is
+   older than its final release: `1.0.4-BETA` < `1.0.4`. The marker is the
+   single source of truth: `virtuaos apply-branding` renders os-release/issue
+   from it and never changes it — only `upgrade.instruction` (or the
+   installer) does.
 6. `vos os upgrade --reapply` can replay the same release to refresh branding
    or files without changing the release number.
 
@@ -100,7 +125,8 @@ Use this when the release depends on fresh package indexes.
 
 Optional boolean.
 
-When `true`, the engine runs:
+When `true`, the engine runs (all apt calls are non-interactive and keep
+locally modified conffiles: `--force-confdef --force-confold`):
 
 ```bash
 apt-get full-upgrade -y
@@ -153,6 +179,9 @@ Fields:
 - `path`: destination path on the host
 - `dest`: alias of `path` for compatibility
 - `mode`: optional file mode like `0644` or `0755`
+- `sha256`: optional expected SHA-256 (hex) of the downloaded file; a mismatch
+  aborts the upgrade. Recommended for every entry (the signed manifest then
+  pins the exact content of every file)
 
 Use this for configs, service files, shell scripts that will be executed later,
 or any other payload that should exist on disk before another step uses it.
@@ -195,6 +224,7 @@ Fields:
 - `cwd`: optional working directory used when running the script
 - `mode`: optional file mode, default `0755`
 - `description`: optional log line shown before execution
+- `sha256`: optional expected SHA-256 (hex) of the script
 
 Example:
 
@@ -268,6 +298,7 @@ The engine applies steps in this order:
 8. `downloadedScripts`
 9. `commands`
 10. `rebootRequired` reminder
+11. `virtuaos apply-branding` (re-render os-release / issue from the marker)
 
 ## Recommended Pattern
 

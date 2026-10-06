@@ -5,6 +5,7 @@
 
 use anyhow::{bail, Context, Result};
 use owo_colors::OwoColorize;
+use std::io::{self, IsTerminal, Write};
 use std::process::Command;
 
 /// Services that make up the Virtua host stack.
@@ -59,12 +60,33 @@ pub fn list() -> Result<()> {
     Ok(())
 }
 
-/// `vos services restart <unit>` — restart a service (defaults to the whole stack).
-pub fn restart(unit: Option<&str>) -> Result<()> {
+/// `vos services restart <unit>` — restart a service (defaults to the whole
+/// stack, which requires confirmation: it restarts docker/containerd/libvirt).
+pub fn restart(unit: Option<&str>, yes: bool) -> Result<()> {
     require_root()?;
     let targets: Vec<&str> = match unit {
         Some(u) => vec![u],
-        None => SERVICES.to_vec(),
+        None => {
+            if !yes {
+                if !io::stdin().is_terminal() {
+                    bail!("restarting the whole stack requires confirmation; rerun with --yes");
+                }
+                println!(
+                    "{} This restarts the WHOLE stack: {}",
+                    "⚠".yellow(),
+                    SERVICES.join(", ")
+                );
+                print!("Continue? [y/N] ");
+                io::stdout().flush()?;
+                let mut answer = String::new();
+                io::stdin().read_line(&mut answer)?;
+                if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes" | "o" | "oui") {
+                    println!("Aborted.");
+                    return Ok(());
+                }
+            }
+            SERVICES.to_vec()
+        }
     };
     for t in targets {
         let status = Command::new("systemctl")

@@ -1,0 +1,10 @@
+# VirtuaOS host firewall — apply changes with:  sudo virtuaos-firewall apply
+# Ports open to everyone (3390-3489 = per-VM RDP consoles of the Virtua panel;
+# the effective sshd port is always added):
+ALLOW_TCP="22 80 443 8441 3390:3489"
+ALLOW_UDP=""
+# Guest bridges (DHCP/DNS served by the host to VMs / LXC / Docker):
+TRUSTED_IFACES="virbr+ lxcbr+ docker0 br-+"
+# Networks allowed on ALL ports (other cluster nodes, admin LAN), e.g.
+# TRUSTED_SOURCES="10.0.0.0/24 192.168.1.10"
+TRUSTED_SOURCES=""

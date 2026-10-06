@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  VirtuaOS Installer 1.0.0
+#  VirtuaOS Installer
 #
 #  Pure shell + whiptail installer. Copies the live filesystem to disk,
 #  sets up locale/keyboard/hostname, installs GRUB, reboots.
 #
 #  Usage:
 #    virtuaos-install            Interactive (asks for everything)
-#    virtuaos-install --auto     Auto-pick first internal disk, defaults rest
+#    virtuaos-install --auto     Auto-pick the internal disk (only when there is
+#                                exactly one), defaults rest
 # =============================================================================
 set -uo pipefail   # NOTE: removed -e — we trap errors manually for better UX
 
@@ -56,8 +57,14 @@ roottext=white,black
 dmesg -n 1 2>/dev/null || true
 echo 0 > /proc/sys/kernel/printk 2>/dev/null || true
 
-clear
-reset
+_IS_BACKEND=false
+for _arg in "$@"; do [[ "${_arg}" == "--backend" ]] && _IS_BACKEND=true; done
+# Backend mode: stdio is the install log and the Rust front-end owns the tty —
+# clear/reset/palette escapes would corrupt its screen.
+if ! ${_IS_BACKEND}; then
+    clear
+    reset
+fi
 
 # ── Force a standard 16-colour VGA palette on the console ─────────────────────
 # The AuxiNux kernel's framebuffer (KMS) console comes up with a SCRAMBLED colour
@@ -78,7 +85,7 @@ set_console_palette() {
     printf '\033]PC5555ff\033]PDff55ff\033]PE55ffff\033]PFffffff'  # C-F  bright blu-wht
     clear   # repaint with the corrected palette
 }
-set_console_palette
+${_IS_BACKEND} || set_console_palette
 
 AUTO_MODE=false
 # BACKEND_MODE: non-interactive. Answers are read from CONF_FILE and progress is
@@ -95,7 +102,7 @@ for _arg in "$@"; do
     esac
 done
 
-VERSION="1.0.3-BETA"
+VERSION="1.0.4-BETA"
 TARGET="/mnt/target"
 LIVE_ROOT="/"
 LOG="/var/log/virtuaos-install.log"
@@ -105,10 +112,16 @@ PROGRESS_FILE="${VIRTUAOS_INSTALL_PROGRESS:-/run/virtuaos-install.progress}"
 CHROOT_SHELL="/bin/bash"
 
 # ── Error trap: show the failed line + last log lines in whiptail ─────────────
+_MAIN_PID=$$
 on_error() {
     local exit_code=$?
     local line_no=$1
     local cmd=$2
+
+    # With errtrace (-E) the trap is also inherited by command substitutions,
+    # where a non-zero pipeline is often expected (e.g. `$(lsblk … | grep -v …)`
+    # matching nothing). Only the main installer process may fail the install.
+    [[ "${BASHPID}" == "${_MAIN_PID}" ]] || return 0
 
     # Restore console messages so we can see anything else
     echo 4 > /proc/sys/kernel/printk 2>/dev/null || true
@@ -155,7 +168,10 @@ cleanup_mounts() {
 }
 
 trap 'on_error ${LINENO} "${BASH_COMMAND}"' ERR
-set -e
+# -E (errtrace): without it the ERR trap is NOT inherited by functions, so a
+# failure inside partition_and_format/configure_target/... exited silently
+# (no error screen, no status=failed for the TUI, no cleanup_mounts).
+set -eE
 
 # Default values
 LANG_CODE="en_US.UTF-8"
@@ -354,6 +370,41 @@ validate_target_runtime() {
     log "Target runtime validation passed with ${CHROOT_SHELL}."
 }
 
+# Map the installer keymap id to XKB layout/variant (used for both the live
+# console and the installed /etc/default/keyboard).
+kb_layout() {
+    case "$1" in
+        pt-br)     echo "br" ;;
+        ca-multix) echo "ca" ;;
+        *)         echo "${1%%-*}" ;;
+    esac
+}
+kb_variant() {
+    case "$1" in
+        ca-multix) echo "multix" ;;
+        ca)        echo "fr" ;;
+        *)         echo "" ;;
+    esac
+}
+
+# Apply the chosen layout to the live console NOW, before any password is typed
+# (otherwise an AZERTY user types the passwords on a QWERTY map and is locked out).
+apply_console_keymap() {
+    local km="$1"
+    [[ -n "${km}" ]] || return 0
+    cat > /etc/default/keyboard <<EOF
+XKBMODEL="pc105"
+XKBLAYOUT="$(kb_layout "${km}")"
+XKBVARIANT="$(kb_variant "${km}")"
+XKBOPTIONS=""
+BACKSPACE="guess"
+EOF
+    if command -v setupcon >/dev/null 2>&1 && setupcon -k --force >/dev/null 2>&1; then
+        return 0
+    fi
+    loadkeys "${km}" >/dev/null 2>&1 || true
+}
+
 # ── Step 0 : Choose wizard language (always EN/FR shown first) ───────────────
 choose_ui_language() {
     local choice
@@ -416,7 +467,7 @@ choose_keyboard() {
         "be"        "Belge" \
         "ch"        "Suisse / Swiss" \
         3>&1 1>&2 2>&3) || exit 0
-    loadkeys "${KEYMAP}" 2>/dev/null || true
+    apply_console_keymap "${KEYMAP}"
 }
 
 # ── Step 3 : Hostname ────────────────────────────────────────────────────────
@@ -481,7 +532,7 @@ net_summary() {
 choose_network() {
     local ifaces_raw=""
     ifaces_raw="$(nmcli -t -f DEVICE,TYPE,STATE device 2>/dev/null \
-        | awk -F: '$2=="ethernet"||$2=="wifi"{print $1"\t"$2"\t"$3}')"
+        | awk -F: '$2=="ethernet"||$2=="wifi"{print $1"\t"$2"\t"$3}' || true)"
     if [[ -z "${ifaces_raw}" ]]; then
         local d n
         for d in /sys/class/net/*; do
@@ -512,14 +563,14 @@ choose_network() {
         18 72 8 "${menu_args[@]}" 3>&1 1>&2 2>&3) || { NET_IFACE=""; return 0; }
     [[ -n "${NET_IFACE}" ]] || return 0
 
-    NET_KIND="$(printf '%b' "${ifaces_raw}" | awk -F'\t' -v d="${NET_IFACE}" '$1==d{print $2; exit}')"
+    NET_KIND="$(printf '%b' "${ifaces_raw}" | awk -F'\t' -v d="${NET_IFACE}" '$1==d{print $2; exit}' || true)"
     [[ "${NET_KIND}" == "wifi" ]] || NET_KIND="ethernet"
 
     if [[ "${NET_KIND}" == "wifi" ]]; then
         command -v rfkill >/dev/null 2>&1 && rfkill unblock all 2>/dev/null || true
         nmcli device wifi rescan ifname "${NET_IFACE}" >/dev/null 2>&1 || true
         local wifi_raw ssid sig sec
-        wifi_raw="$(nmcli -t -f SSID,SIGNAL,SECURITY device wifi list ifname "${NET_IFACE}" 2>/dev/null)"
+        wifi_raw="$(nmcli -t -f SSID,SIGNAL,SECURITY device wifi list ifname "${NET_IFACE}" 2>/dev/null || true)"
         local wmenu=()
         declare -A _seen=()
         while IFS=: read -r ssid sig sec; do
@@ -535,7 +586,7 @@ choose_network() {
             WIFI_SSID=$(whiptail --title "$(t 'WiFi networks' 'Réseaux WiFi')" \
                 --menu "$(t 'Select a network:' 'Sélectionnez un réseau :')" 20 72 10 \
                 "${wmenu[@]}" 3>&1 1>&2 2>&3) || { NET_IFACE=""; return 0; }
-            sec="$(echo "${wifi_raw}" | awk -F: -v s="${WIFI_SSID}" '$1==s{print $3; exit}')"
+            sec="$(echo "${wifi_raw}" | awk -F: -v s="${WIFI_SSID}" '$1==s{print $3; exit}' || true)"
             if [[ -n "${sec}" && "${sec}" != "--" ]]; then
                 WIFI_PASSWORD=$(whiptail --title "$(t 'WiFi password' 'Mot de passe WiFi')" \
                     --passwordbox "$(t 'Enter the WiFi password:' 'Entrez le mot de passe WiFi :')" \
@@ -608,16 +659,22 @@ choose_passwords() {
         "$(t 'Enter a password for the root shell account.\nMin 12 chars, must contain a letter and a digit:' \
             'Entrez un mot de passe pour le compte root.\nMin 12 caractères, doit contenir une lettre et un chiffre :')")
 
+    # prompt_password runs in $(…): its "Cancel → exit 0" only leaves the
+    # subshell and returns an empty string. Treat empty as Cancel here, BEFORE
+    # any disk is touched.
+    [[ -n "${ROOT_PASSWORD}" ]] || exit 0
+
     ADMIN_PASSWORD=$(prompt_password \
         "$(t 'Admin password (web panel)' 'Mot de passe admin (panneau web)')" \
         "$(t 'Enter the initial password for the AuxiNux web panel (admin user).\nSame policy applies:' \
             'Entrez le mot de passe initial du panneau web AuxiNux (compte admin).\nMême politique :')")
+    [[ -n "${ADMIN_PASSWORD}" ]] || exit 0
 }
 
 # ── Step 4 : Disk selection ──────────────────────────────────────────────────
 choose_disk() {
     local disks_raw
-    disks_raw=$(/usr/local/sbin/virtuaos-detect-disks)
+    disks_raw=$(/usr/local/sbin/virtuaos-detect-disks || true)
 
     if [[ -z "${disks_raw}" ]]; then
         die "$(t \
@@ -625,16 +682,28 @@ choose_disk() {
             "Aucun disque interne détecté !\n\nVirtuaOS ne peut s'installer que sur des disques internes.\nLes clés USB sont filtrées pour protéger votre média d'install.")"
     fi
 
+    local disk_count
+    disk_count="$(printf '%s\n' "${disks_raw}" | grep -c . || true)"
+    if [[ "${AUTO_MODE}" == "true" && "${disk_count}" -gt 1 ]]; then
+        # Never guess between several internal disks (lsblk order puts sda
+        # before nvme0n1 — that used to wipe a SATA data disk). Ask instead.
+        log "AUTO mode: ${disk_count} internal disks found — falling back to manual selection"
+        AUTO_MODE=false
+    fi
+
     if [[ "${AUTO_MODE}" == "true" ]]; then
         DISK=$(echo "${disks_raw}" | head -1 | awk '{print $1}')
+        local disk_line
+        disk_line="$(echo "${disks_raw}" | head -1 | tr '\t' ' ')"
         whiptail \
             --title "$(t 'AUTO mode — Confirm' 'Mode AUTO — Confirmation')" \
             --yes-button "$(t 'Erase & Install' 'Effacer & Installer')" \
             --no-button "$(t 'Cancel' 'Annuler')" \
+            --defaultno \
             --yesno "$(t \
-                "The following disk will be COMPLETELY ERASED:\n\n$(echo "${disks_raw}" | head -1)\n\nAll data will be lost.\n\nContinue?" \
-                "Le disque suivant va être COMPLÈTEMENT EFFACÉ :\n\n$(echo "${disks_raw}" | head -1)\n\nToutes les données seront perdues.\n\nContinuer ?")" \
-            14 72 || exit 0
+                "VirtuaOS ${VERSION} — automatic install\n\n  • Disk     : ${disk_line}\n  • Hostname : ${HOSTNAME}\n  • Language : ${LANG_CODE}\n  • Keyboard : ${KEYMAP}\n  • Network  : DHCP\n\nThis disk will be COMPLETELY ERASED. All data will be lost.\n\nContinue?" \
+                "VirtuaOS ${VERSION} — installation automatique\n\n  • Disque   : ${disk_line}\n  • Hostname : ${HOSTNAME}\n  • Langue   : ${LANG_CODE}\n  • Clavier  : ${KEYMAP}\n  • Réseau   : DHCP\n\nCe disque va être COMPLÈTEMENT EFFACÉ. Toutes les données seront perdues.\n\nContinuer ?")" \
+            18 76 || exit 0
     else
         local options=()
         while IFS=$'\t' read -r dev size model rest; do
@@ -685,11 +754,45 @@ run_mkfs() {
         if "$@" >>"${LOG}" 2>&1; then return 0; fi
         rc=$?
         log "mkfs attempt ${i} failed (rc=${rc}): $* — settling then retrying"
-        swapoff -a 2>/dev/null || true
+        release_target_disk
         command -v udevadm >/dev/null 2>&1 && udevadm settle --timeout=5 2>/dev/null || true
         sleep 2
     done
     die "$(t 'Failed to format (device busy):' 'Échec du formatage (périphérique occupé) :') $*"
+}
+
+# Release everything that holds the TARGET disk only (swap, mounts, LVM VGs,
+# device-mapper and MD arrays built on it). Never touches other disks — the old
+# `swapoff -a` / `vgchange -an` / `dmsetup remove_all` tore down every disk.
+release_target_disk() {
+    local dev mp
+    # Swap + mounts on the disk and on everything stacked on it (deepest first).
+    for dev in $(lsblk -lnp -o PATH "${DISK}" 2>/dev/null | tac); do
+        swapoff "${dev}" 2>/dev/null || true
+        for mp in $(lsblk -ln -o MOUNTPOINT "${dev}" 2>/dev/null | grep -v '^$' | sort -r); do
+            umount -lf "${mp}" 2>/dev/null || true
+        done
+    done
+    # LVM: deactivate only the VGs that have a PV on this disk (exact match on
+    # the disk's own device nodes — a prefix match would also hit sdaa / nvme0n10).
+    if command -v pvs >/dev/null 2>&1; then
+        local vg nodes
+        nodes="$(lsblk -lnp -o PATH "${DISK}" 2>/dev/null | tr '\n' ' ' || true)"
+        for vg in $(pvs --noheadings -o pv_name,vg_name 2>/dev/null \
+                    | awk -v n=" ${nodes} " '$2!="" && index(n, " " $1 " ") {print $2}' | sort -u); do
+            vgchange -an "${vg}" >>"${LOG}" 2>&1 || true
+        done
+    fi
+    # device-mapper (LVM LVs, crypt, multipath) + MD arrays stacked on the disk.
+    local name type
+    while read -r name type; do
+        case "${type}" in
+            raid*|md)
+                if command -v mdadm >/dev/null 2>&1; then mdadm --stop "${name}" >>"${LOG}" 2>&1 || true; fi ;;
+            lvm|crypt|dm|mpath)
+                if command -v dmsetup >/dev/null 2>&1; then dmsetup remove "${name}" >>"${LOG}" 2>&1 || true; fi ;;
+        esac
+    done < <(lsblk -lnp -o NAME,TYPE "${DISK}" 2>/dev/null | tail -n +2 | tac)
 }
 
 partition_and_format() {
@@ -697,22 +800,7 @@ partition_and_format() {
     # 1. Release anything holding the target disk. The live media frequently
     #    auto-activates swap/LVM/MD found on the target — that is exactly what
     #    later makes the new partition appear "in use" during mkfs.
-    swapoff -a 2>/dev/null || true
-    for mp in $(lsblk -ln -o MOUNTPOINT "${DISK}" 2>/dev/null | grep -v '^$' | sort -r); do
-        umount -lf "${mp}" 2>/dev/null || true
-    done
-    for part in $(lsblk -ln -o PATH "${DISK}" 2>/dev/null | tail -n +2); do
-        swapoff "${part}" 2>/dev/null || true
-        umount -lf "${part}" 2>/dev/null || true
-    done
-    # Tear down stale LVM / MD / device-mapper sitting on the disk.
-    command -v vgchange >/dev/null 2>&1 && vgchange -an 2>/dev/null || true
-    if command -v mdadm >/dev/null 2>&1; then
-        for md in $(lsblk -lnp -o NAME,TYPE "${DISK}" 2>/dev/null | awk '$2=="raid"||$2=="md"{print $1}'); do
-            mdadm --stop "${md}" 2>/dev/null || true
-        done
-    fi
-    command -v dmsetup >/dev/null 2>&1 && dmsetup remove_all 2>/dev/null || true
+    release_target_disk
 
     progress 5 "$(t 'Creating GPT partition table...' 'Création de la table GPT...')" "${DISK}"
     # Wipe FS signatures on every child partition THEN the whole disk, so udev
@@ -739,7 +827,9 @@ partition_and_format() {
     command -v udevadm >/dev/null 2>&1 && udevadm settle --timeout=15 2>/dev/null || true
 
     # Determine partition names (NVMe = pN suffix)
-    if [[ "${DISK}" =~ nvme|mmcblk|loop ]]; then
+    # Kernel rule: a 'p' separator is used when the disk name ends in a digit
+    # (nvme0n1p1, mmcblk0p1, loop0p1, nbd0p1, md0p1, pmem0p1…), not for sda1.
+    if [[ "${DISK}" =~ [0-9]$ ]]; then
         EFI_PART="${DISK}p1"
         ROOT_PART="${DISK}p3"
     else
@@ -804,6 +894,7 @@ copy_system() {
         --exclude='/var/lib/dbus/machine-id' \
         --exclude='/etc/ssh/ssh_host_*' \
         --exclude='/etc/virtuaos/.firstboot-done' \
+        --exclude='/etc/sudoers.d/90-virtuaos-virtua' \
         --exclude='/var/lib/auxinuxvirtual/db/*' \
         / "${TARGET}/" >> "${LOG}" 2>&1 &
     local rsync_pid=$!
@@ -1026,9 +1117,20 @@ ff02::1     ip6-allnodes
 ff02::2     ip6-allrouters
 EOF
 
-    printf '%s\n' "${VERSION%%-*}" > "${TARGET}/etc/virtuaos-version"
-    chmod 0644 "${TARGET}/etc/virtuaos-version"
-    log "VirtuaOS release marker written: ${VERSION%%-*}"
+    # Release identity. The marker keeps the pre-release suffix (1.0.4-BETA):
+    # `vos os` compares it so a BETA host is offered the final 1.0.4.
+    printf '%s\n' "${VERSION}" > "${TARGET}/etc/virtuaos-version"
+    printf 'VIRTUAOS_VERSION=%s\n' "${VERSION}" > "${TARGET}/etc/virtuaos-release"
+    chmod 0644 "${TARGET}/etc/virtuaos-version" "${TARGET}/etc/virtuaos-release"
+    log "VirtuaOS release marker written: ${VERSION}"
+
+    # Update channels (shared with `vos channel` and the Virtua panel). Fresh
+    # installs start on PROD for both the OS releases and the kernel.
+    mkdir -p "${TARGET}/etc/virtuaos"
+    if [[ ! -f "${TARGET}/etc/virtuaos/channel" ]]; then
+        printf 'VIRTUAOS_CHANNEL=PROD\nKERNEL_CHANNEL=PROD\n' > "${TARGET}/etc/virtuaos/channel"
+    fi
+    chmod 0644 "${TARGET}/etc/virtuaos/channel"
 
     # Locale — write the file directly (no chroot needed; update-locale only edits
     # this same file) so the very first config step never depends on chroot.
@@ -1043,8 +1145,8 @@ EOF
     # Keyboard
     cat > "${TARGET}/etc/default/keyboard" <<EOF
 XKBMODEL="pc105"
-XKBLAYOUT="${KEYMAP%%-*}"
-XKBVARIANT="$(echo "${KEYMAP}" | grep -- - | cut -d- -f2 || true)"
+XKBLAYOUT="$(kb_layout "${KEYMAP}")"
+XKBVARIANT="$(kb_variant "${KEYMAP}")"
 XKBOPTIONS=""
 BACKSPACE="guess"
 EOF
@@ -1056,27 +1158,34 @@ EOF
         log "Timezone set to ${TZ}"
     fi
 
-    # Root password — use `chpasswd --root` (operates on the target WITHOUT a
-    # chroot), so password setting doesn't depend on the post-bind chroot state.
-    if [[ -n "${ROOT_PASSWORD}" ]]; then
-        printf 'root:%s\n' "${ROOT_PASSWORD}" | chpasswd --root "${TARGET}" >> "${LOG}" 2>&1 \
-            && log "Root password set" \
-            || log "WARN: failed to set root password"
-    fi
-    # Also set the virtua shell user password (was admin123 in the live image).
-    # Check the target's passwd file directly instead of `chroot id`.
-    if [[ -n "${ROOT_PASSWORD}" ]] && grep -q "^virtua:" "${TARGET}/etc/passwd" 2>/dev/null; then
+    # Root + virtua passwords — use `chpasswd --root` (operates on the target
+    # WITHOUT a chroot). MANDATORY: the live image ships virtua/admin123, so an
+    # install that could not replace it must fail rather than boot with it.
+    [[ -n "${ROOT_PASSWORD}" ]] || die "$(t 'No root password provided.' 'Aucun mot de passe root fourni.')"
+    printf 'root:%s\n' "${ROOT_PASSWORD}" | chpasswd --root "${TARGET}" >> "${LOG}" 2>&1 \
+        || die "$(t 'Failed to set the root password.' 'Échec de la définition du mot de passe root.')"
+    log "Root password set"
+    if grep -q "^virtua:" "${TARGET}/etc/passwd" 2>/dev/null; then
         printf 'virtua:%s\n' "${ROOT_PASSWORD}" | chpasswd --root "${TARGET}" >> "${LOG}" 2>&1 \
-            && log "Shell user virtua password set" \
-            || log "WARN: failed to set virtua user password"
+            || die "$(t 'Failed to set the virtua user password.' 'Échec de la définition du mot de passe de virtua.')"
+        log "Shell user virtua password set"
     fi
+
+    # Live-only passwordless sudo must never reach the installed system: virtua
+    # keeps sudo through the `sudo` group, WITH its password.
+    rm -f "${TARGET}/etc/sudoers.d/90-virtuaos-virtua"
+    log "Live NOPASSWD sudoers removed from target"
 
     # AuxiNux web panel admin password — write to a one-shot seed file consumed
     # at first boot by virtuaos-firstboot before the API starts the DB.
+    # umask in a subshell: it used to leak and make every later file 0600
+    # (fstab, machine-id, apt sources, grub config…).
     if [[ -n "${ADMIN_PASSWORD}" ]]; then
         mkdir -p "${TARGET}/etc/virtuaos"
-        umask 077
-        printf '%s' "${ADMIN_PASSWORD}" > "${TARGET}/etc/virtuaos/admin-password.seed"
+        (
+            umask 077
+            printf '%s' "${ADMIN_PASSWORD}" > "${TARGET}/etc/virtuaos/admin-password.seed"
+        )
         chmod 0600 "${TARGET}/etc/virtuaos/admin-password.seed"
         log "Admin panel password seed written"
     fi
@@ -1093,12 +1202,14 @@ EOF
 
     # fstab
     local root_uuid efi_uuid
-    root_uuid="$(blkid -s UUID -o value "${ROOT_PART}")"
-    efi_uuid="$(blkid -s UUID -o value "${EFI_PART}")"
+    root_uuid="$(blkid -s UUID -o value "${ROOT_PART}" || true)"
+    efi_uuid="$(blkid -s UUID -o value "${EFI_PART}" || true)"
+    [[ -n "${root_uuid}" && -n "${efi_uuid}" ]] \
+        || die "$(t 'Could not read partition UUIDs (blkid).' 'Impossible de lire les UUID des partitions (blkid).')"
     cat > "${TARGET}/etc/fstab" <<EOF
 # /etc/fstab — generated by VirtuaOS installer
 UUID=${root_uuid}  /          ext4  errors=remount-ro  0  1
-UUID=${efi_uuid}   /boot/efi  vfat  umask=0077         0  1
+UUID=${efi_uuid}   /boot/efi  vfat  umask=0077         0  2
 tmpfs              /tmp       tmpfs defaults,nosuid    0  0
 EOF
 
@@ -1160,17 +1271,14 @@ EOF
     rm -f "${TARGET}/etc/systemd/system/docker.service.live-mask" 2>/dev/null || true
 
     # Validate kernel + initrd are present (required for GRUB to find them)
-    if [[ ! -f "${TARGET}/boot/vmlinuz" && ! -f "${TARGET}/boot/vmlinuz-"* ]] 2>/dev/null; then
-        # Try to find any kernel
-        local kernels
-        kernels="$(ls "${TARGET}/boot/"vmlinuz* 2>/dev/null || true)"
-        if [[ -z "${kernels}" ]]; then
-            die "$(t \
-                "No kernel found in ${TARGET}/boot/\nThe live system did not copy the kernel correctly." \
-                "Aucun noyau trouvé dans ${TARGET}/boot/\nLe système live n'a pas copié le noyau correctement.")"
-        fi
-        log "Kernels found: $(echo "${kernels}" | tr '\n' ' ')"
+    local kernels
+    kernels="$(ls "${TARGET}/boot/"vmlinuz* 2>/dev/null || true)"
+    if [[ -z "${kernels}" ]]; then
+        die "$(t \
+            "No kernel found in ${TARGET}/boot/\nThe live system did not copy the kernel correctly." \
+            "Aucun noyau trouvé dans ${TARGET}/boot/\nLe système live n'a pas copié le noyau correctement.")"
     fi
+    log "Kernels found: $(echo "${kernels}" | tr '\n' ' ')"
 
     progress 85 "$(t 'System configuration done.' 'Configuration système terminée.')" ""
     log "Target configured."
@@ -1205,7 +1313,12 @@ install_grub() {
     # and gives us a reliable fallback even when EFI fails
     progress 87 "$(t 'Installing GRUB BIOS bootloader...' 'Installation GRUB BIOS...')" "${DISK}"
     if ! chroot_target "grub-install --target=i386-pc --recheck --no-floppy ${DISK}"; then
-        log "  WARN: BIOS grub-install failed (this is OK on pure UEFI systems)"
+        if ${efi_mode}; then
+            log "  WARN: BIOS grub-install failed (OK on pure UEFI systems)"
+        else
+            die "$(t 'GRUB (BIOS) installation failed — the system would not boot. See' \
+                     'Installation de GRUB (BIOS) échouée — le système ne démarrerait pas. Voir') ${LOG}"
+        fi
     fi
 
     # If EFI: install EFI grub
@@ -1219,18 +1332,46 @@ install_grub() {
         if ! chroot_target "grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=VirtuaOS --recheck --no-floppy"; then
             log "  WARN: EFI grub-install (registered) failed — trying --removable"
             chroot_target "grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=VirtuaOS --removable --recheck --no-floppy" || \
-                log "  WARN: EFI --removable also failed"
+                die "$(t 'GRUB (EFI) installation failed — the system would not boot. See' \
+                         'Installation de GRUB (EFI) échouée — le système ne démarrerait pas. Voir') ${LOG}"
         fi
 
-        # Manual fallback: copy grubx64.efi to /EFI/BOOT/BOOTX64.EFI (firmware default path)
-        if [[ -f "${TARGET}/boot/efi/EFI/VirtuaOS/grubx64.efi" ]]; then
+        # Fallback boot path /EFI/BOOT/BOOTX64.EFI (firmware default). With
+        # Secure Boot the first stage MUST be the signed shim (which then loads
+        # grubx64.efi from the same directory) — copying grubx64.efi there
+        # directly is rejected by Secure Boot firmware.
+        local efi_src="" d
+        for d in VirtuaOS debian; do
+            if [[ -f "${TARGET}/boot/efi/EFI/${d}/grubx64.efi" ]]; then
+                efi_src="${TARGET}/boot/efi/EFI/${d}"
+                break
+            fi
+        done
+        if [[ -n "${efi_src}" ]]; then
             mkdir -p "${TARGET}/boot/efi/EFI/BOOT"
-            cp -f "${TARGET}/boot/efi/EFI/VirtuaOS/grubx64.efi" \
-                  "${TARGET}/boot/efi/EFI/BOOT/BOOTX64.EFI" 2>/dev/null || true
-        elif [[ -f "${TARGET}/boot/efi/EFI/debian/grubx64.efi" ]]; then
-            mkdir -p "${TARGET}/boot/efi/EFI/BOOT"
-            cp -f "${TARGET}/boot/efi/EFI/debian/grubx64.efi" \
-                  "${TARGET}/boot/efi/EFI/BOOT/BOOTX64.EFI" 2>/dev/null || true
+            if [[ -f "${efi_src}/shimx64.efi" ]]; then
+                cp -f "${efi_src}/shimx64.efi" "${TARGET}/boot/efi/EFI/BOOT/BOOTX64.EFI"
+                cp -f "${efi_src}/grubx64.efi" "${TARGET}/boot/efi/EFI/BOOT/grubx64.efi"
+                if [[ -f "${efi_src}/mmx64.efi" ]]; then
+                    cp -f "${efi_src}/mmx64.efi" "${TARGET}/boot/efi/EFI/BOOT/mmx64.efi"
+                fi
+                log "  EFI fallback: shim -> EFI/BOOT/BOOTX64.EFI"
+                # Debian's signed grub reads its stub grub.cfg from its own
+                # directory or from EFI/debian — provide both for the fallback.
+                if [[ -f "${efi_src}/grub.cfg" ]]; then
+                    cp -f "${efi_src}/grub.cfg" "${TARGET}/boot/efi/EFI/BOOT/grub.cfg"
+                    mkdir -p "${TARGET}/boot/efi/EFI/debian"
+                    [[ -f "${TARGET}/boot/efi/EFI/debian/grub.cfg" ]] \
+                        || cp -f "${efi_src}/grub.cfg" "${TARGET}/boot/efi/EFI/debian/grub.cfg"
+                fi
+            else
+                cp -f "${efi_src}/grubx64.efi" "${TARGET}/boot/efi/EFI/BOOT/BOOTX64.EFI"
+                log "  EFI fallback: grub -> EFI/BOOT/BOOTX64.EFI (no shim)"
+            fi
+        fi
+        if ! compgen -G "${TARGET}/boot/efi/EFI/*/*.[eE][fF][iI]" >/dev/null; then
+            die "$(t 'No EFI bootloader on the EFI partition — the system would not boot. See' \
+                     'Aucun chargeur EFI sur la partition EFI — le système ne démarrerait pas. Voir') ${LOG}"
         fi
     fi
 
@@ -1252,7 +1393,7 @@ EOF
         kernel="$(ls "${TARGET}/boot/"vmlinuz-* 2>/dev/null | head -1 | xargs -n1 basename || echo vmlinuz)"
         initrd="$(ls "${TARGET}/boot/"initrd.img-* 2>/dev/null | head -1 | xargs -n1 basename || echo initrd.img)"
         local root_uuid
-        root_uuid="$(blkid -s UUID -o value "${ROOT_PART}")"
+        root_uuid="$(blkid -s UUID -o value "${ROOT_PART}" || true)"
 
         mkdir -p "${TARGET}/boot/grub"
         cat > "${TARGET}/boot/grub/grub.cfg" <<GRUBCFG
@@ -1333,13 +1474,16 @@ load_answers() {
             admin_password) ADMIN_PASSWORD="${val}" ;;
         esac
     done < "${CONF_FILE}"
+    rm -f "${CONF_FILE}" 2>/dev/null || true   # plaintext passwords — drop it first
     [[ -b "${DISK}" ]] || die "disk ${DISK} not found"
-    rm -f "${CONF_FILE}" 2>/dev/null || true   # plaintext passwords — drop it
+    # The front-end validates the disk, but re-check here: never wipe a disk
+    # that the detector does not list as an eligible internal disk.
+    /usr/local/sbin/virtuaos-detect-disks 2>/dev/null | awk -F'\t' '{print $1}' | grep -qx -- "${DISK}" \
+        || die "disk ${DISK} is not an eligible internal disk (live medium / USB / too small)"
 }
 
 if ${BACKEND_MODE}; then
     load_answers
-    loadkeys "${KEYMAP}" 2>/dev/null || true
     log "BACKEND mode: disk=${DISK} lang=${LANG_CODE} kb=${KEYMAP} hostname=${HOSTNAME} tz=${TZ}"
 else
 
@@ -1381,6 +1525,10 @@ fi   # end: interactive/auto vs backend answer collection
 echo 0 > /proc/sys/kernel/printk 2>/dev/null || true
 
 log "═══ VirtuaOS ${VERSION} installation started ═══"
+
+# Never wipe a disk for an install that cannot finish: passwords are mandatory.
+[[ -n "${ROOT_PASSWORD}" ]] || die "$(t 'No root password provided — nothing was changed on disk.' \
+                                       'Aucun mot de passe root fourni — aucun disque modifié.')"
 
 progress 1 "$(t 'Starting installation...' 'Démarrage de linstallation...')" ""
 partition_and_format

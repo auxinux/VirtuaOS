@@ -9,6 +9,8 @@ echo "[VirtuaOS] Setting executable permissions…"
 chmod 755 /usr/local/sbin/virtuaos-install        2>/dev/null || true
 chmod 755 /usr/local/sbin/virtuaos-detect-disks   2>/dev/null || true
 chmod 755 /usr/local/sbin/virtuaos-firstboot      2>/dev/null || true
+chmod 755 /usr/local/sbin/virtuaos-seed-cleanup   2>/dev/null || true
+chmod 755 /usr/local/sbin/virtuaos-firewall        2>/dev/null || true
 chmod 755 /usr/local/bin/virtuaos-status          2>/dev/null || true
 chmod 644 /etc/profile.d/virtuaos.sh              2>/dev/null || true
 

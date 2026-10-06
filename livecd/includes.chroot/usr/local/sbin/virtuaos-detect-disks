@@ -16,17 +16,35 @@ set -euo pipefail
 
 MIN_SIZE_BYTES=$(( 8 * 1024 * 1024 * 1024 ))  # 8 GiB
 
-# Identify the disk hosting the live medium (so we exclude it)
-LIVE_DEV=""
+# Identify the disk(s) hosting the live medium (so we exclude them).
+# Resolves partitions to their parent disk, a whole-disk source (iso-hybrid dd'd
+# as-is) to itself, and a loop device (findiso / Ventoy) to the disk holding its
+# backing file.
+parent_disk() {
+    local src="$1" depth="${2:-0}" pk type back
+    [[ -n "${src}" && "${depth}" -lt 4 ]] || return 0
+    [[ -b "${src}" ]] || return 0
+    type="$(lsblk -dn -o TYPE "${src}" 2>/dev/null | head -1 || true)"
+    if [[ "${type}" == "loop" ]]; then
+        back="$(losetup -n -O BACK-FILE "${src}" 2>/dev/null | head -1 || true)"
+        [[ -n "${back}" ]] || return 0
+        parent_disk "$(findmnt -n -o SOURCE -T "${back}" 2>/dev/null | head -1 || true)" $((depth + 1))
+        return 0
+    fi
+    pk="$(lsblk -n -o PKNAME "${src}" 2>/dev/null | head -1 || true)"
+    if [[ -n "${pk}" ]]; then
+        echo "/dev/${pk}"
+    elif [[ "${type}" == "disk" ]]; then
+        echo "${src}"
+    fi
+}
+
+LIVE_DEVS=" "
 for mp in /run/live/medium /cdrom /run/live/findiso /lib/live/mount/medium; do
     if mountpoint -q "$mp" 2>/dev/null; then
         SRC="$(findmnt -n -o SOURCE "$mp" 2>/dev/null | head -1 || true)"
-        if [[ -n "$SRC" ]]; then
-            # Walk up to the parent disk (e.g. /dev/sdb1 → /dev/sdb)
-            LIVE_DEV="$(lsblk -n -o PKNAME "$SRC" 2>/dev/null | head -1 || true)"
-            [[ -n "$LIVE_DEV" ]] && LIVE_DEV="/dev/${LIVE_DEV}"
-            break
-        fi
+        d="$(parent_disk "${SRC}")"
+        [[ -n "${d}" ]] && LIVE_DEVS+="${d} "
     fi
 done
 
@@ -50,7 +68,7 @@ while IFS= read -r line; do
     [[ "${TRAN}" != "usb" ]] || continue
 
     # Filter: skip the live boot device
-    [[ "${DEV}" != "${LIVE_DEV}" ]] || continue
+    [[ "${LIVE_DEVS}" != *" ${DEV} "* ]] || continue
 
     # Filter: skip too small
     [[ "${SIZE_BYTES}" -ge "${MIN_SIZE_BYTES}" ]] || continue

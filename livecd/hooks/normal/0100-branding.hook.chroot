@@ -5,12 +5,20 @@
 # =============================================================================
 set -euo pipefail
 
-VIRTUAOS_VERSION="1.0.3-BETA"
+VIRTUAOS_VERSION="1.0.4-BETA"
 
 echo "[VirtuaOS] Applying system branding…"
 
 # ── /etc/os-release ──────────────────────────────────────────────────────────
-cat > /etc/os-release <<EOF
+# On Debian 13 /etc/os-release is a symlink to /usr/lib/os-release, a plain file
+# of base-files: every base-files upgrade (13.x point release) would put the
+# Debian identity back (ID=debian) and `vos os` would stop recognising the host.
+# Divert it so base-files installs its copy as /usr/lib/os-release.debian.
+if ! dpkg-divert --list /usr/lib/os-release 2>/dev/null | grep -q os-release; then
+    dpkg-divert --local --rename --divert /usr/lib/os-release.debian --add /usr/lib/os-release
+fi
+[[ -L /etc/os-release ]] || ln -sf ../usr/lib/os-release /etc/os-release
+cat > /usr/lib/os-release <<EOF
 PRETTY_NAME="VirtuaOS ${VIRTUAOS_VERSION} (Debian 13 Trixie)"
 NAME="VirtuaOS"
 VERSION="${VIRTUAOS_VERSION}"
@@ -25,13 +33,19 @@ DEBIAN_CODENAME="trixie"
 BUILD_ID="$(date -u +%Y%m%d)"
 EOF
 
-printf '%s\n' "${VIRTUAOS_VERSION%%-*}" > /etc/virtuaos-version
-chmod 0644 /etc/virtuaos-version
+# Release marker: FULL version, pre-release suffix included (1.0.4-BETA), so
+# `vos os` can tell a BETA from the final release.
+printf '%s\n' "${VIRTUAOS_VERSION}" > /etc/virtuaos-version
+printf 'VIRTUAOS_VERSION=%s\n' "${VIRTUAOS_VERSION}" > /etc/virtuaos-release
+chmod 0644 /etc/virtuaos-version /etc/virtuaos-release
 
-# Keep Debian variant for compatibility (point release this ISO is based on)
-cat > /etc/debian_version <<EOF
-13.6
-EOF
+# Update channels shared with `vos channel` and the Virtua panel.
+mkdir -p /etc/virtuaos
+printf 'VIRTUAOS_CHANNEL=PROD\nKERNEL_CHANNEL=PROD\n' > /etc/virtuaos/channel
+chmod 0644 /etc/virtuaos/channel
+
+# /etc/debian_version is left to base-files (it is one of its conffiles —
+# overwriting it only produced a dpkg prompt and a stale value).
 
 # ── Hostname ─────────────────────────────────────────────────────────────────
 echo "virtuaos" > /etc/hostname
@@ -54,14 +68,14 @@ cat > /etc/issue <<'ISSUE'
    ╚████╔╝ ██║██║  ██║   ██║   ╚██████╔╝██║  ██║╚██████╔╝███████║
     ╚═══╝  ╚═╝╚═╝  ╚═╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝
 
-  Version 1.0.3-BETA  •  Powered by Debian 13 Trixie  •  x86_64
+  Version 1.0.4-BETA  •  Powered by Debian 13 Trixie  •  x86_64
 
 ISSUE
 
 # ── /etc/issue.net (shown for SSH) ───────────────────────────────────────────
 cat > /etc/issue.net <<'ISSUENET'
-VirtuaOS 1.0.3-BETA — Powered by Debian 13 Trixie
-Web Panel: https://<IP>:8441
+VirtuaOS 1.0.4-BETA — Powered by Debian 13 Trixie
+Web Panel: http://<IP>:8441
 ISSUENET
 
 # ── /etc/motd (shown after login) ────────────────────────────────────────────

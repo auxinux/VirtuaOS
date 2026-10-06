@@ -42,7 +42,11 @@ if [[ -f "${SEED_FILE}" && -f "${ENV_FILE}" ]] && ! grep -q "^AUXINUX_INITIAL_AD
         log "Admin panel password seeded into .env"
     fi
     # Remove the seed file once consumed — it has done its job and should not linger.
+    # (The .env line itself is removed by virtuaos-seed-cleanup once the API has
+    # initialised its database with it.)
     rm -f "${SEED_FILE}"
+elif [[ -f "${SEED_FILE}" && ! -f "${ENV_FILE}" ]]; then
+    log "WARN: ${ENV_FILE} missing — admin password seed NOT applied (kept in ${SEED_FILE})."
 fi
 
 # ── 2. Fresh SSH host keys ───────────────────────────────────────────────────
@@ -65,12 +69,15 @@ if [[ -f /etc/machine-id ]] && [[ -s /etc/machine-id ]]; then
 fi
 
 # ── 4. Load KVM module matching CPU ──────────────────────────────────────────
+add_module() {
+    modprobe "$1" 2>/dev/null || true
+    grep -qx "$1" /etc/modules-load.d/virtuaos.conf 2>/dev/null \
+        || echo "$1" >> /etc/modules-load.d/virtuaos.conf
+}
 if grep -q vmx /proc/cpuinfo 2>/dev/null; then
-    modprobe kvm_intel 2>/dev/null || true
-    echo "kvm_intel" >> /etc/modules-load.d/virtuaos.conf
+    add_module kvm_intel
 elif grep -q svm /proc/cpuinfo 2>/dev/null; then
-    modprobe kvm_amd 2>/dev/null || true
-    echo "kvm_amd" >> /etc/modules-load.d/virtuaos.conf
+    add_module kvm_amd
 fi
 
 # ── 5. Define libvirt default network ────────────────────────────────────────

@@ -23,6 +23,7 @@ fn require_root() -> Result<()> {
 fn run_inherit(program: &str, args: &[&str]) -> Result<()> {
     let status = Command::new(program)
         .args(args)
+        .env("DEBIAN_FRONTEND", "noninteractive")
         .status()
         .with_context(|| format!("failed to launch `{program}`"))?;
     if !status.success() {
@@ -54,7 +55,10 @@ pub fn upgradable_count() -> Result<usize> {
 /// Annotate a package name with a human hint.
 fn annotate(pkg: &str) -> String {
     match pkg {
-        "kernel-virtua" => " (kernel — reboot required)".yellow().to_string(),
+        "kernel-virtua" | "kernel-virtua-dev" => " (kernel — reboot required)".yellow().to_string(),
+        p if p.starts_with("linux-image-") && p.contains("auxinux-virtua") => {
+            " (kernel — reboot required)".yellow().to_string()
+        }
         "auxinux-virtua" => " (Virtua panel)".cyan().to_string(),
         "virtuaos-cli" => " (this tool)".dimmed().to_string(),
         _ => String::new(),
@@ -102,7 +106,19 @@ pub fn run(check: bool, yes: bool) -> Result<()> {
     }
 
     println!("\n{}", "→ Applying updates…".bold());
-    run_inherit("apt-get", &["dist-upgrade", "-y"])?;
+    // Keep locally modified conffiles (/etc/issue, /etc/issue.net are
+    // base-files conffiles rebranded by VirtuaOS) instead of prompting.
+    run_inherit(
+        "apt-get",
+        &[
+            "-o",
+            "Dpkg::Options::=--force-confdef",
+            "-o",
+            "Dpkg::Options::=--force-confold",
+            "dist-upgrade",
+            "-y",
+        ],
+    )?;
 
     if upgrades.iter().any(|p| p == "auxinux-virtua") {
         println!("\n{}", "→ Enabling and restarting Virtua services…".bold());
@@ -116,18 +132,17 @@ pub fn run(check: bool, yes: bool) -> Result<()> {
         }
     }
 
-    // Keep the VirtuaOS release identity (os-release / issue) in sync. When
-    // virtuaos-cli itself was upgraded, its postinst already stamped the NEW
-    // version — re-stamping from THIS (now older) process would revert it, so
-    // only refresh when the cli was NOT part of this upgrade.
-    if !upgrades.iter().any(|p| p == "virtuaos-cli") {
-        if let Err(e) = crate::branding::apply() {
-            eprintln!("  {} branding refresh skipped: {e}", "warn".yellow());
-        }
+    // Re-render the release identity (os-release / issue) from the version
+    // marker — a base-files upgrade may just have reset it. Rendering never
+    // changes the version, so this is safe whatever cli version runs it.
+    if let Err(e) = crate::branding::apply() {
+        eprintln!("  {} branding refresh skipped: {e}", "warn".yellow());
     }
 
     println!("\n{} Update complete.", "✓".green());
-    if upgrades.iter().any(|p| p == "kernel-virtua") {
+    if upgrades.iter().any(|p| {
+        p.starts_with("kernel-virtua") || (p.starts_with("linux-image-") && p.contains("auxinux-virtua"))
+    }) {
         println!(
             "{} A new kernel was installed — reboot to activate it ({}).",
             "⚠".yellow(),

@@ -1,0 +1,55 @@
+{
+  "version": "1.0.4-BETA",
+  "messages": [
+    "Mise à jour VirtuaOS 1.0.4-BETA (canal DEV).",
+    "Sécurité : suppression du sudo sans mot de passe de virtua, pare-feu actif (INPUT DROP),",
+    "permissions corrigées, mot de passe admin initial retiré du .env.",
+    "Le pare-feu fait confiance au(x) réseau(x) local(aux) de l'hôte : ajustez /etc/virtuaos/firewall.conf.",
+    "Canaux PROD/DEV : voir 'vos channel'."
+  ],
+  "aptUpdate": true,
+  "aptInstall": [
+    "virtuaos-cli"
+  ],
+  "files": [
+    {
+      "path": "/usr/local/sbin/virtuaos-firewall",
+      "mode": "0755",
+      "sha256": "39e5b246401f376eea9dbe3f76094feb37e829253090f570f4b614e0e64bb94f"
+    },
+    {
+      "path": "/usr/local/sbin/virtuaos-seed-cleanup",
+      "mode": "0755",
+      "sha256": "7f8e45637ae8250e00d79dbfd11910b7ebbb50504f81f2f59a8ae7575dcf5121"
+    },
+    {
+      "path": "/etc/systemd/system/virtuaos-seed-cleanup.service",
+      "mode": "0644",
+      "sha256": "2ca1dd7be9c0e814cb057ecf885483f9faeb3f6e364d0ea6d710a89fcdadebe9"
+    },
+    {
+      "path": "/etc/virtuaos/firewall.conf.dist",
+      "mode": "0644",
+      "sha256": "88bae72db18ab6d47e613f90372be52f22c10a9a46a80491ada454380b33d482"
+    }
+  ],
+  "downloadedScripts": [
+    {
+      "url": "https://dep.auxinux.ca/VIRTUAOS/DEV/1.0.4/scripts/migrate-1.0.4.sh",
+      "description": "Correctifs 1.0.4 (sudo, permissions, pare-feu, .env, canaux)",
+      "mode": "0755",
+      "sha256": "26e816689fd560f64905c968ce53311623c8fc8d5fb04f2e6a3500076f1fad72"
+    }
+  ],
+  "commands": [
+    {
+      "description": "Écrire le marqueur de version VirtuaOS",
+      "run": "printf '%s\\n' '1.0.4-BETA' > /etc/virtuaos-version"
+    },
+    {
+      "description": "Réappliquer le branding (os-release protégé contre base-files)",
+      "run": "virtuaos apply-branding"
+    }
+  ],
+  "rebootRequired": false
+}

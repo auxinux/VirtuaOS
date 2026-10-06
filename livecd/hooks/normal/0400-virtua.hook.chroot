@@ -238,6 +238,23 @@ WantedBy=multi-user.target
 EOF
 enable_unit virtuaos-firstboot.service
 
+# ── 7b. Drop the initial admin password from .env once the API seeded it ─────
+cat > /etc/systemd/system/virtuaos-seed-cleanup.service <<EOF
+[Unit]
+Description=VirtuaOS — remove the initial admin password from the Virtua .env
+After=auxinuxvirtual-api.service
+Wants=auxinuxvirtual-api.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/virtuaos-seed-cleanup
+StandardOutput=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+enable_unit virtuaos-seed-cleanup.service
+
 # ── 8. Kernel modules + sysctl ───────────────────────────────────────────────
 cat > /etc/modules-load.d/virtuaos.conf <<'EOF'
 kvm
