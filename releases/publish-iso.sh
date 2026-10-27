@@ -25,14 +25,18 @@
 # l'affiche, plus rien n'est recopie a la main.
 #
 # Usage:
-#   publish-iso.sh --iso CHEMIN_DISTANT [--name NOM] [--deploy]
-#   publish-iso.sh --iso CHEMIN_DISTANT --name NOM_PUBLIE --relink [--deploy]
+#   publish-iso.sh --iso CHEMIN_DISTANT [--name NOM] [--remove-previous] [--deploy]
+#   publish-iso.sh --iso CHEMIN_DISTANT --name NOM_PUBLIE --relink [--remove-previous] [--deploy]
 #
 #   --iso     chemin de l'ISO SUR l'hote de build (obligatoire)
 #   --name    nom publie (defaut: nom de l'ISO; s'il est deja pris sur le
 #             depot par une autre ISO, suffixe -2, -3... avant -amd64.iso)
 #   --relink  l'ISO est DEJA publiee sous NOM_PUBLIE (verifie par sha256):
 #             ne refait que le .sha256 s'il manque, la fiche et les liens fixes
+#   --remove-previous
+#             une fois le lien fixe verifie sur la nouvelle ISO, supprime du
+#             depot l'ISO VirtuaOS vers laquelle il pointait avant (et son
+#             .sha256). Seulement celle-la: les autres ISO restent.
 #   --deploy  effectue reellement la publication; sans cette option, le script
 #             se contente de verifier et d'afficher ce qu'il ferait
 #
@@ -54,14 +58,16 @@ ISO_REMOTE=""
 PUBLISH_NAME=""
 DEPLOY=0
 RELINK=0
+REMOVE_PREVIOUS=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --iso)    ISO_REMOTE="${2:?--iso demande un chemin}"; shift 2 ;;
     --name)   PUBLISH_NAME="${2:?--name demande un nom}"; shift 2 ;;
     --relink) RELINK=1; shift ;;
+    --remove-previous) REMOVE_PREVIOUS=1; shift ;;
     --deploy) DEPLOY=1; shift ;;
-    -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,46p' "$0"; exit 0 ;;
     *) echo "argument inconnu: $1" >&2; exit 64 ;;
   esac
 done
@@ -139,6 +145,20 @@ print("    %s %s %s, noyau %s, Debian %s, construite %s" % (f["produit"], f["ver
       f["noyau"]["complet"], f["debian"]["version"], f["construite"]))
 for l in f["logiciels"]: print("    - %s %s" % (l["nom"], l["version"]))' "${MANIFEST}"
 
+# ISO vers laquelle pointe le lien fixe AVANT cette publication, lue dans
+# l'extrait nginx (ligne `# virtuaos-<ARCH>.iso -> NOM`).
+SNIPPET="${NGINX_SNIPPETS}/virtuaos-iso-${ARCH}.conf"
+PREVIOUS="$(ssh "${REPO_HOST}" "sudo -n cat '${SNIPPET}' 2>/dev/null" \
+  | sed -n "s|^# virtuaos-${ARCH}\.iso -> \(VirtuaOS-[A-Za-z0-9.+-]*-${ARCH}\.iso\)\$|\1|p" | head -n1)"
+echo "==> Lien fixe actuel : ${PREVIOUS:-(aucun)}"
+if [[ "${REMOVE_PREVIOUS}" -eq 1 ]]; then
+  if [[ -n "${PREVIOUS}" && "${PREVIOUS}" != "${PUBLISH_NAME}" ]]; then
+    echo "    ${PREVIOUS} (+ .sha256) sera supprimee apres verification du nouveau lien"
+  else
+    echo "    --remove-previous: rien a supprimer"
+  fi
+fi
+
 if [[ "${DEPLOY}" -ne 1 ]]; then
   echo
   echo "Verifications passees. Relancez avec --deploy pour publier."
@@ -199,7 +219,6 @@ echo "    HTTP ${code}, Content-Length ${len}"
 
 # --- Liens fixes et fiche ------------------------------------------------------
 STABLE="virtuaos-${ARCH}"
-SNIPPET="${NGINX_SNIPPETS}/virtuaos-iso-${ARCH}.conf"
 
 echo "==> Liens fixes ${STABLE}.iso -> ${PUBLISH_NAME} (${SNIPPET})"
 # Ancien extrait garde de cote (.precedent, hors du motif d'include
@@ -279,6 +298,15 @@ import json, sys
 f = json.load(sys.stdin)
 assert f["fichier"] == sys.argv[1] and f["sha256"] == sys.argv[2], "fiche servie incorrecte"
 print("    " + sys.argv[3] + ".json: " + f["produit"] + " " + f["version"] + ", " + f["fichier"])' "${PUBLISH_NAME}" "${SHA_SRC}" "${STABLE}"
+
+# Seulement maintenant: le lien fixe et la fiche servent la nouvelle ISO.
+if [[ "${REMOVE_PREVIOUS}" -eq 1 && -n "${PREVIOUS}" && "${PREVIOUS}" != "${PUBLISH_NAME}" ]]; then
+  echo "==> Suppression de l'ancienne ISO ${PREVIOUS}"
+  ssh "${REPO_HOST}" "rm -fv '${REPO_DIR}/${PREVIOUS}' '${REPO_DIR}/${PREVIOUS}.sha256'" | sed 's/^/    /'
+  code="$(curl -sS -o /dev/null -w '%{http_code}' -r 0-0 "${PUBLIC_URL}/${PREVIOUS}")"
+  echo "    ${PREVIOUS} -> HTTP ${code}"
+  [[ "${code}" == "404" ]] || { echo "ERREUR: ${PREVIOUS} est encore servie" >&2; exit 70; }
+fi
 
 echo
 echo "Publie: ${PUBLIC_URL}/${PUBLISH_NAME}"

@@ -137,6 +137,10 @@ releases/publish-iso.sh --iso /home/debian/ISO/VirtuaOS-1.0.4-BETA-amd64.iso
 # puis liens fixes (nginx) et fiche JSON
 releases/publish-iso.sh --iso /home/debian/ISO/VirtuaOS-1.0.4-BETA-amd64.iso --deploy
 
+# Idem, et supprimer du dépôt l'ISO vers laquelle pointait le lien fixe
+# (seulement elle, et seulement après vérification du nouveau lien)
+releases/publish-iso.sh --iso /home/debian/ISO/VirtuaOS-1.0.4-BETA-amd64.iso --remove-previous --deploy
+
 # ISO déjà en ligne (vérifiée par sha256) : refaire seulement liens et fiche
 releases/publish-iso.sh --iso <chemin sur virtua-dev> --name VirtuaOS-1.0.3-BETA-amd64.iso --relink --deploy
 ```
@@ -317,6 +321,9 @@ releases/publish-iso.sh --iso /home/debian/ISO/VirtuaOS-1.0.4-BETA-amd64.iso    
 releases/publish-iso.sh --iso /home/debian/ISO/VirtuaOS-1.0.4-BETA-amd64.iso --deploy   # publish
 releases/publish-iso.sh --iso <path> --name <published name> --relink --deploy           # already online
 ```
+
+`--remove-previous` deletes the ISO the fixed link pointed to before (and its
+`.sha256`), only after the new link has been verified.
 
 A published ISO is **never overwritten**: a rebuilt ISO whose name is taken is
 published as `VirtuaOS-<version>-2-amd64.iso`, `-3`, etc. (or `--name`).
