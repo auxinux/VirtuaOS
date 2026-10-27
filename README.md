@@ -102,6 +102,51 @@ Le menu de démarrage GRUB propose :
 - **Install VirtuaOS (auto)** — installation automatisée (premier disque disponible).
 - **Live shell** — démarrage en mode live sans installation.
 
+## Télécharger l'ISO — lien fixe et fiche
+
+La dernière ISO publiée est toujours au même endroit (redirection 302 vers
+l'ISO réelle, qui garde son vrai nom) :
+
+| Lien fixe | Contenu |
+|-----------|---------|
+| `https://dep.auxinux.ca/DOWNLOAD/ISO/virtuaos-amd64.iso` | l'ISO la plus récente |
+| `https://dep.auxinux.ca/DOWNLOAD/ISO/virtuaos-amd64.iso.sha256` | son empreinte (`sha256sum -c`) |
+| `https://dep.auxinux.ca/DOWNLOAD/ISO/virtuaos-amd64.json` | la fiche : version, noyau, Debian, logiciels, taille, sha256 |
+
+```bash
+# curl -O garderait le nom du lien fixe : on suit la redirection pour le vrai nom
+iso=$(curl -fsSI -o /dev/null -w '%{redirect_url}' https://dep.auxinux.ca/DOWNLOAD/ISO/virtuaos-amd64.iso)
+curl -fLO "$iso" && curl -fLO "$iso.sha256"
+sha256sum -c "$(basename "$iso").sha256"
+```
+
+La fiche est tirée de l'ISO elle-même (`releases/iso-manifest.py`), au même
+format que celle d'AuxiNux OS : le site os.auxinux.ca la lit, rien n'est
+recopié à la main.
+
+## Publier une ISO
+
+Depuis une machine qui a accès SSH à `virtua-dev` (hôte de build) **et** à
+`virtua-repo` (dépôt) — le transfert passe en flux par elle :
+
+```bash
+# Vérifier seulement (rien n'est modifié)
+releases/publish-iso.sh --iso /home/debian/ISO/VirtuaOS-1.0.4-BETA-amd64.iso
+
+# Publier : copie en .part, comparaison sha256, renommage, .sha256,
+# puis liens fixes (nginx) et fiche JSON
+releases/publish-iso.sh --iso /home/debian/ISO/VirtuaOS-1.0.4-BETA-amd64.iso --deploy
+
+# ISO déjà en ligne (vérifiée par sha256) : refaire seulement liens et fiche
+releases/publish-iso.sh --iso <chemin sur virtua-dev> --name VirtuaOS-1.0.3-BETA-amd64.iso --relink --deploy
+```
+
+Une ISO publiée n'est **jamais écrasée** : une ISO reconstruite sous un nom
+déjà pris est publiée en `VirtuaOS-<version>-2-amd64.iso`, `-3`, etc. (ou
+`--name`). Les liens fixes sont écrits dans
+`/etc/nginx/snippets/virtuaos-iso-amd64.conf` (validé par `nginx -t`, l'ancien
+est remis en cas d'échec).
+
 ## Dépôts séparés
 
 VirtuaOS et le contrôleur Virtua sont des **projets distincts**. Le layout local
@@ -247,6 +292,34 @@ The GRUB boot menu offers:
 - **Install VirtuaOS** — interactive install (you choose the disk).
 - **Install VirtuaOS (auto)** — automated install (first available disk).
 - **Live shell** — boot without installing.
+
+## Download the ISO — fixed link and manifest
+
+The latest published ISO is always at the same URL (302 redirect to the real
+ISO, which keeps its real file name):
+
+| Fixed link | Content |
+|------------|---------|
+| `https://dep.auxinux.ca/DOWNLOAD/ISO/virtuaos-amd64.iso` | latest ISO |
+| `https://dep.auxinux.ca/DOWNLOAD/ISO/virtuaos-amd64.iso.sha256` | its checksum (`sha256sum -c`) |
+| `https://dep.auxinux.ca/DOWNLOAD/ISO/virtuaos-amd64.json` | manifest: version, kernel, Debian, software, size, sha256 |
+
+The manifest is extracted from the ISO itself (`releases/iso-manifest.py`), in
+the same format as AuxiNux OS's; os.auxinux.ca reads it.
+
+## Publishing an ISO
+
+From a machine with SSH access to both `virtua-dev` (build host) and
+`virtua-repo` (repo host) — the transfer is streamed through it:
+
+```bash
+releases/publish-iso.sh --iso /home/debian/ISO/VirtuaOS-1.0.4-BETA-amd64.iso            # check only
+releases/publish-iso.sh --iso /home/debian/ISO/VirtuaOS-1.0.4-BETA-amd64.iso --deploy   # publish
+releases/publish-iso.sh --iso <path> --name <published name> --relink --deploy           # already online
+```
+
+A published ISO is **never overwritten**: a rebuilt ISO whose name is taken is
+published as `VirtuaOS-<version>-2-amd64.iso`, `-3`, etc. (or `--name`).
 
 ## Separate repositories
 
