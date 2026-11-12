@@ -102,7 +102,7 @@ for _arg in "$@"; do
     esac
 done
 
-VERSION="1.0.4-BETA"
+VERSION="1.0.4"
 TARGET="/mnt/target"
 LIVE_ROOT="/"
 LOG="/var/log/virtuaos-install.log"

@@ -1,6 +1,10 @@
 # VirtuaOS releases (DEV / pre-release channel)
 
-latest: 1.0.4-BETA
+latest: 1.0.4
+
+## 1.0.4
+
+Final release, same content as 1.0.4-BETA (now also on the PROD channel).
 
 ## 1.0.4-BETA
 

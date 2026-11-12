@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  VirtuaOS 1.0.4-BETA — in-place fixes for hosts installed with ≤ 1.0.3
+#  VirtuaOS 1.0.4 — in-place fixes for hosts installed with ≤ 1.0.3
 #  Run by `vos os upgrade` (downloadedScripts). Idempotent: safe to re-run
 #  (`vos os upgrade --reapply`).
 #

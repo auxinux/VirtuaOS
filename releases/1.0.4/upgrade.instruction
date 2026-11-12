@@ -1,7 +1,7 @@
 {
-  "version": "1.0.4-BETA",
+  "version": "1.0.4",
   "messages": [
-    "Mise à jour VirtuaOS 1.0.4-BETA (canal DEV).",
+    "Mise à jour VirtuaOS 1.0.4.",
     "Sécurité : suppression du sudo sans mot de passe de virtua, pare-feu actif (INPUT DROP),",
     "permissions corrigées, mot de passe admin initial retiré du .env.",
     "Le pare-feu fait confiance au(x) réseau(x) local(aux) de l'hôte : ajustez /etc/virtuaos/firewall.conf.",
@@ -35,16 +35,16 @@
   ],
   "downloadedScripts": [
     {
-      "url": "https://dep.auxinux.ca/VIRTUAOS/DEV/1.0.4/scripts/migrate-1.0.4.sh",
+      "url": "https://dep.auxinux.ca/VIRTUAOS/1.0.4/scripts/migrate-1.0.4.sh",
       "description": "Correctifs 1.0.4 (sudo, permissions, pare-feu, .env, canaux)",
       "mode": "0755",
-      "sha256": "26e816689fd560f64905c968ce53311623c8fc8d5fb04f2e6a3500076f1fad72"
+      "sha256": "57804e1921999ed040f2e05e8a21d785a7f56bdbe943833e0fd7ab6e22446edb"
     }
   ],
   "commands": [
     {
       "description": "Écrire le marqueur de version VirtuaOS",
-      "run": "printf '%s\\n' '1.0.4-BETA' > /etc/virtuaos-version"
+      "run": "printf '%s\\n' '1.0.4' > /etc/virtuaos-version"
     },
     {
       "description": "Réappliquer le branding (os-release protégé contre base-files)",
